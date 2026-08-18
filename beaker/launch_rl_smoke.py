@@ -25,6 +25,8 @@ def main():
     p.add_argument("--image", default=os.environ.get("BEAKER_IMAGE", ""),
                    help="Existing Beaker image with the slime/Megatron/SGLang stack.")
     p.add_argument("--name", default="openwebrl_rl_smoke")
+    p.add_argument("--script", default="beaker/run_rl_smoke.sh",
+                   help="Repo-relative in-container entry script.")
     p.add_argument("--cluster", default="ai2/jupiter")
     p.add_argument("--budget", default="ai2/oe-omai")
     p.add_argument("--workspace", default="ai2/general-tool-use")
@@ -53,7 +55,7 @@ def main():
         "--env", "OPENWEBRL_ROOT=" + OPENWEBRL_ROOT,
         "--no-python",
         "--allow-dirty",
-        "--", "bash", f"{OPENWEBRL_ROOT}/beaker/run_rl_smoke.sh",
+        "--", "bash", f"{OPENWEBRL_ROOT}/{args.script}",
     ]
 
     print("[launch]", " ".join(command))

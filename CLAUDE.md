@@ -1,5 +1,16 @@
 # CLAUDE.md — OpenWebRL
 
+> ## ⛔ GIT PUSH POLICY — READ FIRST
+> **ONLY push to the user's fork `peter-sushko/OpenWebRL` (remote `origin`).**
+> **NEVER push, open PRs, or otherwise write to the upstream `OpenWebRL/OpenWebRL`
+> organization repo — under any circumstances.**
+> - Pushing a branch to the fork is fine; opening PRs must target `base: peter-sushko/OpenWebRL`.
+> - When creating a PR with `gh`, always pin it: `gh pr create --repo peter-sushko/OpenWebRL --base main …`.
+> - Do NOT use the "Create a pull request for…" link GitHub prints after a push — it
+>   defaults the PR base to the upstream org repo. (This already caused an accidental
+>   upstream PR once.)
+> - Never add `OpenWebRL/OpenWebRL` as a remote.
+
 Notes for Claude on how RL works in this repo and how to run it. Verified against the
 code on 2026-06-08 (branch `main`). File:line refs may drift — re-check before relying.
 

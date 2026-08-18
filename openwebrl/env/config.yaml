@@ -42,7 +42,7 @@ local_process:
   request_timeout_secs: 300
   exit_timeout_secs: 10
   kill_timeout_secs: 5
-  max_processes: 16
+  max_processes: 64
   acquire_timeout_secs: 600
   log_dir: "/tmp/slime_browser_local_process_env_logs"
   port_lock_dir: "/tmp/slime_browser_local_process_ports"
