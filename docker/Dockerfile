@@ -8,6 +8,7 @@ ARG MEGATRON_COMMIT=3714d81d418c9f1bca4594fc35f9e8289f652862
 
 ARG ENABLE_CUDA_13=0
 
+
 # ======================================== Setup =============================================
 
 WORKDIR /root/
@@ -37,9 +38,22 @@ RUN pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f
 RUN pip install flash-linear-attention==0.4.1
 RUN pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu128/
 
+# The released Dockerfile pinned nvidia-mathdx==26.6.0, which exists on neither
+# PyPI nor pypi.nvidia.com (both top out at 25.6.0), so ENABLE_CUDA_13=1 died at
+# "No matching distribution found". Declared HERE, not beside ENABLE_CUDA_13 at the
+# top: an ARG invalidates the cache for every layer after it, and declaring it at
+# the top forced a full flash-attn rebuild (~21 min).
+#
+# pybind11/cmake/ninja are added because this branch builds TE from source with
+# --no-build-isolation, so pip never installs TE's own build requirements and
+# build_tools/build_ext.py fails at "ModuleNotFoundError: No module named
+# 'pybind11'". The ENABLE_CUDA_13=0 branch installs a prebuilt wheel and so never
+# hits this.
+ARG MATHDX_VERSION=25.6.0
+
 # TE does not have wheel on cuda 13 yet, thus need to install from source
 RUN if [ "${ENABLE_CUDA_13}" = "1" ]; then \
-      pip install nvidia-mathdx==26.6.0 && \
+      pip install "nvidia-mathdx==${MATHDX_VERSION}" pybind11 cmake ninja && \
       pip -v install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.10; \
     else \
       pip -v install --no-build-isolation "transformer_engine[pytorch]==2.10.0"; \
@@ -71,6 +85,36 @@ RUN if [ "$ENABLE_CUDA_13" = "1" ]; then \
     SGL_KERNEL_VERSION=0.3.17.post2 && \
     python3 -m pip install https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sgl_kernel-${SGL_KERNEL_VERSION}+cu130-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps; \
   fi
+
+# ---- B300 / sm_103 support without migrating to CUDA 13 (ENABLE_SM103=1) -------
+# B300 is compute capability 10.3. Every prebuilt sgl-kernel for CUDA 12.x ships
+# cubins for sm_80/89/90/100/120 and NO PTX, so on B300 the first fused kernel
+# dies with "RMSNorm failed ... no kernel image is available for execution on the
+# device" during sglang cuda-graph capture. Verified with cuobjdump on both the
+# base image's 0.3.21 and the plain 0.3.17.post2 wheel.
+#
+# The only prebuilt wheel WITH sm_103 is the +cu130 one above, but it needs the
+# full CUDA 13 runtime (libcudart/libcublas/libnvrtc .so.13), i.e. a cu130 base
+# image -- which ships sglang 0.5.15, where OpenWebRL's own sglang.patch (182
+# hunks / 57 files, including models/qwen3_vl.py and
+# scheduler_update_weights_mixin.py) does NOT apply. Skipping that patch is not an
+# option: it modifies the model being trained and the RL weight-sync path.
+#
+# So instead: rebuild sgl-kernel from source on the CUDA 12.9 base, adding the
+# sm_103a gencode. sgl-kernel's CMakeLists already has that gencode but gates it
+# behind CUDA_VERSION >= 13.0, which is conservative -- nvcc 12.9 compiles both
+# compute_103a/sm_103a and compute_103/sm_103 (verified), and also supports the
+# --compress-mode=size flag in the same branch. Lowering the gate to 12.9 is
+# therefore sufficient, and leaves the sglang version and all patches untouched.
+ARG ENABLE_SM103=0
+RUN if [ "$ENABLE_SM103" = "1" ]; then \
+      cd /sgl-workspace/sglang && \
+      git submodule update --init --recursive sgl-kernel 2>/dev/null || git submodule update --init --recursive || true; \
+      cd /sgl-workspace/sglang/sgl-kernel && \
+      sed -i 's|VERSION_GREATER_EQUAL "13.0"|VERSION_GREATER_EQUAL "12.9"|' CMakeLists.txt && \
+      grep -n 'compute_103a' CMakeLists.txt && \
+      MAX_JOBS=64 pip install -v . --no-build-isolation --force-reinstall --no-deps; \
+    fi
 
 # https://github.com/pytorch/pytorch/issues/168167
 RUN pip install nvidia-cudnn-cu12==9.16.0.29

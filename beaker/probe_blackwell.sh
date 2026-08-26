@@ -59,3 +59,28 @@ def fa():
     flash_attn_func(q, q, q); torch.cuda.synchronize()
 check("flash_attn_func", fa)
 EOF
+
+# Triton JITs at runtime, so it must recognise the arch. sglang uses Triton
+# kernels on several paths, and the OpenWebRL CUDA-13 image path pulls a patched
+# Triton fork specifically for newer Blackwell -- so verify a real JIT compile +
+# launch on this device rather than assuming.
+python3 - <<'EOF'
+import torch
+try:
+    import triton, triton.language as tl
+    print("triton", triton.__version__)
+
+    @triton.jit
+    def _add1(p, n, BLOCK: tl.constexpr):
+        off = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        m = off < n
+        tl.store(p + off, tl.load(p + off, mask=m) + 1.0, mask=m)
+
+    x = torch.zeros(4096, device="cuda", dtype=torch.float32)
+    _add1[(4,)](x, x.numel(), BLOCK=1024)
+    torch.cuda.synchronize()
+    assert torch.allclose(x, torch.ones_like(x)), "triton kernel wrote wrong values"
+    print("EXEC OK triton jit")
+except Exception as e:
+    print("EXEC FAIL triton jit", type(e).__name__, str(e)[:200])
+EOF
