@@ -171,6 +171,19 @@ set -x
 # ---- Chromium for Playwright ----
 python -m playwright install chromium || playwright install chromium
 
+# ---- Token-capped micro-batching (RL_MAX_TOKENS_PER_GPU) ---------------------
+# Needed on H100 80 GiB. Iteration 0 completed its rollout and then OOM'd in
+# slime/backends/megatron_utils/loss.py:80 at `logits.div(rollout_temperature)`,
+# trying to allocate 2.10 GiB with 2.73 GiB free while the colocated sglang engine
+# held 6.28 GiB. That is the LOGITS tensor (tokens x vocab 151936), not
+# activations -- which is why --recompute alone was not enough; it bounds
+# activation memory only. Capping tokens per micro-batch bounds the logits
+# allocation directly. The launcher ships both flags commented out at :481-483.
+#
+# Unset on B200/B300, which have the headroom to run the launcher's static
+# micro-batching unchanged.
+RL_MAX_TOKENS_PER_GPU="${RL_MAX_TOKENS_PER_GPU:-}"
+
 # ---- Rollout task timeout ----------------------------------------------------
 # Paper Table 7 sets "Rollout task timeout 600 s", but that assumes a Kubernetes
 # sandbox whose browser is ready in ~1 s. In local_process the env_server is cold
@@ -203,6 +216,10 @@ sed -i -e "s|^set -ex$|set -e|" \
        -e "s|--lr 5e-7|--lr ${RL_LR}|" \
        -e "s|--eval-interval 5|--eval-interval ${EVAL_INTERVAL}|" \
        -e "s|--custom-config-path openwebrl/browser_training_config.yaml|--custom-config-path openwebrl/browser_training_config_repro.yaml|" "${RUN}"
+if [ -n "${RL_MAX_TOKENS_PER_GPU}" ]; then
+  sed -i -e "s|# --use-dynamic-batch-size|--use-dynamic-batch-size|" \
+         -e "s|# --max-tokens-per-gpu 8192|--max-tokens-per-gpu ${RL_MAX_TOKENS_PER_GPU}|" "${RUN}"
+fi
 if [ "${RL_RECOMPUTE}" = "1" ]; then
   sed -i -e "s|# --recompute-granularity full|--recompute-granularity full|" \
          -e "s|# --recompute-method uniform|--recompute-method uniform|" \
@@ -214,6 +231,6 @@ diff "${SRC}" "${RUN}" || true
 echo "=================================================================="
 echo "save_dir=${SLIME_SAVE_DIR}  resume_from=${SLIME_LOAD_CHECKPOINT:-<none>}"
 echo "browser concurrency=${SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES}  judge=${JUDGE_MODEL}"
-echo "stage=${RL_STAGE}  num_rollout=${NUM_ROLLOUT}  max_steps=${BROWSER_MAX_STEPS}  lr=${RL_LR}  recompute=${RL_RECOMPUTE}  eval_interval=${EVAL_INTERVAL}  task_timeout=${ROLLOUT_TASK_TIMEOUT}"
+echo "stage=${RL_STAGE}  num_rollout=${NUM_ROLLOUT}  max_steps=${BROWSER_MAX_STEPS}  lr=${RL_LR}  recompute=${RL_RECOMPUTE}  eval_interval=${EVAL_INTERVAL}  task_timeout=${ROLLOUT_TASK_TIMEOUT}  max_tokens_per_gpu=${RL_MAX_TOKENS_PER_GPU:-<static>}"
 
 bash "${RUN}"

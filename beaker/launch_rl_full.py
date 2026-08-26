@@ -84,6 +84,10 @@ def main():
     p.add_argument("--eval-interval", type=int, default=0,
                    help="Iterations between WebVoyager eval passes (launcher default 5). "
                         "~80 min per pass; raising it only costs monitoring resolution.")
+    p.add_argument("--max-tokens-per-gpu", type=int, default=0,
+                   help="Enable --use-dynamic-batch-size with this token cap. Needed on H100 "
+                        "80 GiB, where the logits tensor (tokens x vocab 151936) OOMs in "
+                        "loss.py:80 even with recompute. Leave unset on B200/B300.")
     p.add_argument("--recompute", action="store_true",
                    help="Enable Megatron activation recompute (RL_RECOMPUTE=1). Mathematically "
                         "identical, ~30-40%% slower; use it to fit H100 80 GiB.")
@@ -116,6 +120,8 @@ def main():
         "--env", "RL_STAGE=" + str(args.stage),
         *(["--env", "SLIME_SAVE_DIR=" + args.save_dir] if args.save_dir else []),
         *(["--env", "RL_RECOMPUTE=1"] if args.recompute else []),
+        *(["--env", "RL_MAX_TOKENS_PER_GPU=" + str(args.max_tokens_per_gpu)]
+          if args.max_tokens_per_gpu else []),
         *(["--env", "EVAL_INTERVAL=" + str(args.eval_interval)] if args.eval_interval else []),
         *(["--env", "SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES=" + str(args.browser_concurrency)]
           if args.browser_concurrency else []),
