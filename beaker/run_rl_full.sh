@@ -99,6 +99,12 @@ export SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES="${SLIME_BROWSER_LOCAL_PROCESS_
 # timeout. Local disk removes that from the startup path. Set
 # SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR explicitly to override (e.g. back to Weka
 # when you need the logs to survive the job).
+# env/config.yaml sets startup_timeout_secs=30, but measured env_server startup
+# is 50-500s once training rollouts contend with Megatron + 8 sglang engines for
+# CPU. A 30s budget therefore rejects environments that are merely slow, which is
+# what the "env_server at http..." failures are. Raising the budget discards no
+# work and changes no training math -- it only stops throwing away usable envs.
+export SLIME_BROWSER_LOCAL_PROCESS_STARTUP_TIMEOUT_SECS="${SLIME_BROWSER_LOCAL_PROCESS_STARTUP_TIMEOUT_SECS:-300}"
 export SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR="${SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR:-/tmp/env_server_logs}"
 mkdir -p "${SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR}"
 
