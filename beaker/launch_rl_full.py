@@ -84,6 +84,10 @@ def main():
     p.add_argument("--eval-interval", type=int, default=0,
                    help="Iterations between WebVoyager eval passes (launcher default 5). "
                         "~80 min per pass; raising it only costs monitoring resolution.")
+    p.add_argument("--sglang-attention-backend", default="",
+                   help="Force sglang's attention backend (e.g. triton). Needed on Blackwell, "
+                        "where the auto-selected TRTLLM decode path calls an sgl_kernel op whose "
+                        "signature does not match the installed sglang 0.5.6.post2.")
     p.add_argument("--max-tokens-per-gpu", type=int, default=0,
                    help="Enable --use-dynamic-batch-size with this token cap. Needed on H100 "
                         "80 GiB, where the logits tensor (tokens x vocab 151936) OOMs in "
@@ -122,6 +126,8 @@ def main():
         *(["--env", "RL_RECOMPUTE=1"] if args.recompute else []),
         *(["--env", "RL_MAX_TOKENS_PER_GPU=" + str(args.max_tokens_per_gpu)]
           if args.max_tokens_per_gpu else []),
+        *(["--env", "SGLANG_ATTENTION_BACKEND=" + args.sglang_attention_backend]
+          if args.sglang_attention_backend else []),
         *(["--env", "EVAL_INTERVAL=" + str(args.eval_interval)] if args.eval_interval else []),
         *(["--env", "SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES=" + str(args.browser_concurrency)]
           if args.browser_concurrency else []),
