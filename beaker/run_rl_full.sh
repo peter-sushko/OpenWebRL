@@ -91,7 +91,15 @@ if [ "${SLIME_BROWSER_ENV_MODE}" = "sandbox" ]; then
 fi
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/root/.cache/ms-playwright}"
 export SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES="${SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES:-90}"
-export SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR="${SLIME_SAVE_DIR}/env_server_logs"
+# env_server logs go to NODE-LOCAL disk, not Weka. One fresh env_server (and
+# Chromium) is spawned per task, each streaming stdout/stderr to its own file, so
+# at concurrency 48 that is 48 concurrent writers plus a file create per task.
+# Weka is a shared network FS sitting at 99% full here, and env_server startup
+# latency climbed 60s -> 476s over ~300 task launches against a 600s task
+# timeout. Local disk removes that from the startup path. Set
+# SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR explicitly to override (e.g. back to Weka
+# when you need the logs to survive the job).
+export SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR="${SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR:-/tmp/env_server_logs}"
 mkdir -p "${SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR}"
 
 # ---- Judge: gpt-4.1 (paper) over the public OpenAI API ----
