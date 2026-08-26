@@ -184,6 +184,18 @@ python -m playwright install chromium || playwright install chromium
 # micro-batching unchanged.
 RL_MAX_TOKENS_PER_GPU="${RL_MAX_TOKENS_PER_GPU:-}"
 
+# ---- Triton must use the CUDA 12.9 ptxas, not its bundled 12.8 one -----------
+# Triton ships its own ptxas at triton/backends/nvidia/bin/ptxas. In this image
+# that is release 12.8, which does not accept --gpu-name sm_103, so every Triton
+# JIT compile on B300 dies with "PTXAS error: Internal Triton PTX codegen error".
+# The system ptxas is 12.9 and does support sm_103 (verified with
+# `ptxas --gpu-name sm_103`). sglang uses Triton kernels on many paths, so this is
+# needed regardless of the attention backend.
+if [ -x /usr/local/cuda/bin/ptxas ]; then
+  export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
+  echo "TRITON_PTXAS_PATH=${TRITON_PTXAS_PATH} ($(/usr/local/cuda/bin/ptxas --version 2>/dev/null | tail -1))"
+fi
+
 # ---- sglang attention backend (SGLANG_ATTENTION_BACKEND) ---------------------
 # sglang leaves attention_backend=None and auto-selects. On Blackwell it picks the
 # TRTLLM paged-attention decode path, which calls sgl_kernel's
