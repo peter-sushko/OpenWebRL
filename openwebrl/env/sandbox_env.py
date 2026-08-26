@@ -924,13 +924,15 @@ async def _provision_sandbox(
     # On success, SandboxWebEnv takes ownership of the sandbox (which
     # internally holds a client reference) and closes it in exit().
     # On failure, we clean up the client here via try/except.
+    # The Orchard client sets max_retries/retry_delay as attributes, not
+    # constructor kwargs -- passing them to __init__ raises TypeError.
     client = AsyncSandboxClient(
         base_url=orchestrator_url,
         api_key=api_key,
         auto_cleanup=True,
-        max_retries=int(sandbox_cfg.get("max_retries", 3) or 3),
-        retry_delay=int(sandbox_cfg.get("retry_delay", 1) or 1),
     )
+    client.max_retries = int(sandbox_cfg.get("max_retries", 3) or 3)
+    client.retry_delay = int(sandbox_cfg.get("retry_delay", 1) or 1)
 
     sandbox = None
     slot_acquired = False

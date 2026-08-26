@@ -688,6 +688,32 @@ def _load_local_resources(
     return task_data, tool_list, policy
 
 
+
+def _all_images_from_messages(messages) -> list[str]:
+    """Every screenshot in the episode, in order, from the UNFILTERED messages.
+
+    The turn-level rollout filters messages down to the last
+    `context_num_screenshots` images before building img_list, so img_list is the
+    policy's context, not the trajectory. The eval judges
+    (webvoyager/deepshop take [-3:], online_mind2web takes [-1]) need the whole
+    history, which only survives on mm_messages.
+    """
+    out: list[str] = []
+    for msg in messages or []:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "image_url":
+                continue
+            url = item.get("image_url")
+            if isinstance(url, dict):
+                url = url.get("url")
+            if isinstance(url, str) and url:
+                out.append(url)
+    return out
+
+
 def _apply_browser_env_mode_override(env_config: BrowserEnvConfig) -> BrowserEnvConfig:
     """Allow launch scripts to select the browser env backend without editing config.yaml."""
     mode = os.environ.get("SLIME_BROWSER_ENV_MODE")
@@ -1854,7 +1880,12 @@ async def _generate_turn_sample_impl(
             # trajectory via metadata["messages"] / ["full_image_list"]. Whichever
             # turn ends up last then carries the complete trajectory.
             turn_sample.metadata["messages"] = list(mm_messages)
-            turn_sample.metadata["full_image_list"] = list(img_list)
+            # img_list comes from mm_messages_filtered, which keeps only the last
+            # `context_num_screenshots` images (=1 in the paper's setting). Using it
+            # here left the eval judges with a single screenshot even though they ask
+            # for the last 3. Rebuild from the unfiltered mm_messages so this really
+            # is the full trajectory, as the comment above intends.
+            turn_sample.metadata["full_image_list"] = _all_images_from_messages(mm_messages) or list(img_list)
 
             # 9. Check if generation should stop (from the SGLang side)
             if finish_type == "length":

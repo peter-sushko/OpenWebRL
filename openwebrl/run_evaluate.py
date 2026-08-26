@@ -427,7 +427,7 @@ def main():
     parser.add_argument("--sglang-port", type=int, default=30000)
     parser.add_argument("--hf-checkpoint", type=str, default=os.environ.get("MODEL_PATH") or os.environ.get("HF_CHECKPOINT", ""))
     parser.add_argument("--max-steps", type=int, default=16)
-    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--temperature", type=float, default=float(os.environ.get("EVAL_TEMPERATURE", 0.0)))
     parser.add_argument("--output", type=str, default=os.environ.get("OUTPUT_ROOT", "eval_outputs/browser_eval"),
                         help="Output JSONL path (default: auto-generated with timestamp)")
     parser.add_argument("--context-num-screenshots", type=int, default=3,
@@ -534,9 +534,15 @@ def main():
 
     init_http_client(eval_args)
 
+    # Paper Table 8. Official-score protocol: temp 0.6 / top-p 0.95 / top-k 20
+    # (stochastic). w/o-aborted protocol: 0.0 / 1.0 / 1 (deterministic).
+    # max response length 4096 and repetition penalty 1.0 in both.
     sampling_params = {
         "temperature": args.temperature,
-        "max_new_tokens": 2048,
+        "max_new_tokens": int(os.environ.get("EVAL_MAX_NEW_TOKENS", 4096)),
+        "top_p": float(os.environ.get("EVAL_TOP_P", 1.0)),
+        "top_k": int(os.environ.get("EVAL_TOP_K", -1)),
+        "repetition_penalty": float(os.environ.get("EVAL_REPETITION_PENALTY", 1.0)),
     }
 
     # Load tasks
