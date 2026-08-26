@@ -171,6 +171,26 @@ set -x
 # ---- Chromium for Playwright ----
 python -m playwright install chromium || playwright install chromium
 
+# ---- Rollout task timeout ----------------------------------------------------
+# Paper Table 7 sets "Rollout task timeout 600 s", but that assumes a Kubernetes
+# sandbox whose browser is ready in ~1 s. In local_process the env_server is cold
+# started per task and, once training rollouts contend for CPU, startup measured
+# 420 s mean / 599 s max -- so a 600 s task budget leaves an episode ~100 s for 15
+# steps and it is killed mid-way. Measured across three runs at concurrency 90 and
+# 48, with logs on Weka and on local disk: same result every time.
+#
+# Raising the task timeout keeps the paper's EFFECTIVE episode budget (600 s of
+# actual browsing) rather than spending most of it on a startup tax the paper does
+# not have. It changes no optimization hyperparameter. Set ROLLOUT_TASK_TIMEOUT to
+# 600 to go back to the literal paper value.
+ROLLOUT_TASK_TIMEOUT="${ROLLOUT_TASK_TIMEOUT:-1800}"
+CFG_SRC="${OPENWEBRL_ROOT}/openwebrl/browser_training_config.yaml"
+CFG_RUN="${OPENWEBRL_ROOT}/openwebrl/browser_training_config_repro.yaml"
+cp "${CFG_SRC}" "${CFG_RUN}"
+sed -i -e "s|^rollout_task_timeout_secs:.*|rollout_task_timeout_secs: ${ROLLOUT_TASK_TIMEOUT}.0|" "${CFG_RUN}"
+echo "=== config diff (rollout_task_timeout only) ==="
+diff "${CFG_SRC}" "${CFG_RUN}" || true
+
 # ---- Patch only the two site-specific lines, in a throwaway copy. Keep it in
 # scripts/ so the launcher's REPO_ROOT=$(dirname)/.. math still resolves. ----
 SRC="${OPENWEBRL_ROOT}/scripts/run_browser_Qwen3VL_4B_Instruct.sh"
@@ -181,7 +201,8 @@ sed -i -e "s|^set -ex$|set -e|" \
        -e "s|--wandb-project slime-dev|--wandb-project ${WANDB_PROJECT_NAME}|" \
        -e "s|--num-rollout 100|--num-rollout ${NUM_ROLLOUT}|" \
        -e "s|--lr 5e-7|--lr ${RL_LR}|" \
-       -e "s|--eval-interval 5|--eval-interval ${EVAL_INTERVAL}|" "${RUN}"
+       -e "s|--eval-interval 5|--eval-interval ${EVAL_INTERVAL}|" \
+       -e "s|--custom-config-path openwebrl/browser_training_config.yaml|--custom-config-path openwebrl/browser_training_config_repro.yaml|" "${RUN}"
 if [ "${RL_RECOMPUTE}" = "1" ]; then
   sed -i -e "s|# --recompute-granularity full|--recompute-granularity full|" \
          -e "s|# --recompute-method uniform|--recompute-method uniform|" \
@@ -193,6 +214,6 @@ diff "${SRC}" "${RUN}" || true
 echo "=================================================================="
 echo "save_dir=${SLIME_SAVE_DIR}  resume_from=${SLIME_LOAD_CHECKPOINT:-<none>}"
 echo "browser concurrency=${SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES}  judge=${JUDGE_MODEL}"
-echo "stage=${RL_STAGE}  num_rollout=${NUM_ROLLOUT}  max_steps=${BROWSER_MAX_STEPS}  lr=${RL_LR}  recompute=${RL_RECOMPUTE}  eval_interval=${EVAL_INTERVAL}"
+echo "stage=${RL_STAGE}  num_rollout=${NUM_ROLLOUT}  max_steps=${BROWSER_MAX_STEPS}  lr=${RL_LR}  recompute=${RL_RECOMPUTE}  eval_interval=${EVAL_INTERVAL}  task_timeout=${ROLLOUT_TASK_TIMEOUT}"
 
 bash "${RUN}"
