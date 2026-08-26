@@ -12,6 +12,10 @@ Usage:
   # a local checkpoint, one benchmark
   python beaker/launch_eval.py --ckpt /weka/.../OpenWebRL-4B-SFT --bench om2w
 
+  # full WebVoyager through the paper's Browser-Use stealth browsers, 20 at a time
+  python beaker/launch_eval.py --ckpt OpenWebRL/OpenWebRL-4B --bench webvoyager \
+      --env-mode browser-use --n-parallel 20 --run-tag wv_browseruse
+
   # a 12-task subset through Browserbase stealth browsers
   python beaker/launch_eval.py --ckpt OpenWebRL/OpenWebRL-4B --bench webvoyager \
       --env-mode browserbase --task-indices 227,239,469 --run-tag wv_blocked_bb
@@ -47,12 +51,25 @@ def browserbase_env_args(args):
     ]
 
 
+def browser_use_env_args(args):
+    """Extra gantry args for Browser-Use mode (the paper's stealth browsers)."""
+    if args.env_mode != "browser-use":
+        return []
+    return [
+        "--env", "SLIME_BROWSER_ENV_MODE=browser-use",
+        "--secret-env", "BROWSER_USE_API_KEY=" + args.browser_use_key_secret,
+        "--env", f"BU_MAX_CONCURRENCY={args.browser_use_max_concurrency}",
+    ]
+
+
 def env_mode_args(args):
     """Extra gantry args for whichever non-default browser env mode is selected."""
     if args.env_mode == "local_process":
         return []
     if args.env_mode == "browserbase":
         return browserbase_env_args(args)
+    if args.env_mode == "browser-use":
+        return browser_use_env_args(args)
     return sandbox_env_args(args)
 
 
@@ -84,9 +101,21 @@ def main():
     p.add_argument("--gpus", type=int, default=8)
     p.add_argument("--priority", default="urgent")
     p.add_argument("--env-mode", default="local_process",
-                   choices=("local_process", "sandbox", "browserbase"),
-                   help="Browser env mode. 'sandbox' uses Orchard pods (the paper's setting); "
-                        "'browserbase' uses remote stealth browsers with residential proxies.")
+                   choices=("local_process", "sandbox", "browserbase", "browser-use"),
+                   help="Browser env mode. 'sandbox' uses Orchard pods; 'browser-use' uses the "
+                        "paper's Browser-Use Stealth Browsers; 'browserbase' uses Browserbase "
+                        "stealth browsers with residential proxies.")
+    p.add_argument("--browser-use-key-secret", default="MOLMOWEB_BROWSERUSE",
+                   help="Beaker secret holding the Browser-Use API key.")
+    p.add_argument("--browser-use-max-concurrency", type=int, default=25,
+                   help="Account concurrency cap. run_eval.sh refuses to start if --n-parallel "
+                        "reaches it, since each task holds one cloud browser.")
+    p.add_argument("--score-mode", default="", choices=("", "official", "noaborted"),
+                   help="Paper Table 8 decoding preset. 'official' = temp 0.6/top_p 0.95/top_k 20 "
+                        "(the Table 2 headline); 'noaborted' = temp 0.0/top_p 1.0/top_k 1.")
+    p.add_argument("--n-parallel", type=int, default=0,
+                   help="Concurrent tasks (one browser session each). 0 keeps the script default "
+                        "of 16. Must stay under the provider's concurrency cap.")
     p.add_argument("--browserbase-key-secret", default="PS_BROWSERBASE_API_KEY",
                    help="Beaker secret holding the Browserbase API key.")
     p.add_argument("--browserbase-project-secret", default="PS_BROWSERBASE_PROJECT_ID",
@@ -131,6 +160,9 @@ def main():
             "--env", "BENCH=" + bench,
             "--env", "CKPT=" + args.ckpt,
             *env_mode_args(args),
+            *(["--env", f"SLIME_BROWSER_SANDBOX_MAX_SANDBOXES={args.n_parallel}"]
+              if args.n_parallel else []),
+            *(["--env", "EVAL_SCORE_MODE=" + args.score_mode] if args.score_mode else []),
             *(["--env", "TASK_INDICES=" + args.task_indices] if args.task_indices else []),
             *(["--env", "RUN_TAG=" + args.run_tag] if args.run_tag else []),
             "--no-python",

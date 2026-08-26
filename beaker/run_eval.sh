@@ -90,6 +90,27 @@ export JUDGE_MODEL="${JUDGE_MODEL:-}"   # empty => protocol default (o4-mini om2
 # Orchard pods (the paper's setting). Sandbox mode additionally needs the Orchard
 # client on the path at ./sandbox/client -- already symlinked in this checkout. ----
 export SLIME_BROWSER_ENV_MODE="${SLIME_BROWSER_ENV_MODE:-local_process}"
+if [ "${SLIME_BROWSER_ENV_MODE}" = "browser-use" ]; then
+  # Browser-Use cloud browsers -- the paper's own "Browser-Use Stealth Browsers".
+  # The integration (openwebrl/env/browser_use_env.py) is the authors' code; we
+  # only supply the key and hold concurrency under the account cap.
+  : "${BROWSER_USE_API_KEY:?browser-use mode requires BROWSER_USE_API_KEY}"
+  export BROWSER_USE_API_KEY
+  python -c "import browser_use_sdk" 2>/dev/null \
+    || pip install --no-cache-dir browser-use-sdk \
+    || { echo "ERROR: could not install the browser-use SDK"; exit 7; }
+  # Account cap is 25 concurrent browsers; --n-parallel is one session per task,
+  # so keep it strictly below the cap to leave room for teardown lag.
+  BU_MAX_CONCURRENCY="${BU_MAX_CONCURRENCY:-25}"
+  if [ "${SLIME_BROWSER_SANDBOX_MAX_SANDBOXES:-16}" -ge "${BU_MAX_CONCURRENCY}" ]; then
+    echo "ERROR: n_parallel=${SLIME_BROWSER_SANDBOX_MAX_SANDBOXES} would meet or exceed the"
+    echo "       Browser-Use concurrency cap of ${BU_MAX_CONCURRENCY}. Lower it."
+    exit 8
+  fi
+  echo "browser-use mode: n_parallel=${SLIME_BROWSER_SANDBOX_MAX_SANDBOXES} cap=${BU_MAX_CONCURRENCY}"
+  # Stop anything a previous aborted run left billing.
+  python -m openwebrl.env.browser_use_env --cleanup || true
+fi
 if [ "${SLIME_BROWSER_ENV_MODE}" = "browserbase" ]; then
   # Browserbase: remote stealth Chromium over CDP, residential proxies, in-band
   # CAPTCHA solving. This is the closest available stand-in for the paper's
@@ -144,15 +165,27 @@ curl -sS --connect-timeout 10 --max-time 20 -o /dev/null -w "openai -> %{http_co
 # ---- Chromium for Playwright (python package is in the image's requirements) ----
 python -m playwright install chromium || playwright install chromium
 
-export EVAL_TEMPERATURE="${EVAL_TEMPERATURE:-0.0}"
-export EVAL_TOP_P="${EVAL_TOP_P:-1.0}"
-export EVAL_TOP_K="${EVAL_TOP_K:--1}"
+# Paper Table 8 defines TWO decoding configs. EVAL_SCORE_MODE selects one:
+#   official  -> temp 0.6 / top_p 0.95 / top_k 20   (the Table 2 headline number)
+#   noaborted -> temp 0.0 / top_p 1.0  / top_k 1    ("success rate w/o aborted tasks")
+# Explicit EVAL_TEMPERATURE/TOP_P/TOP_K still override.
+EVAL_SCORE_MODE="${EVAL_SCORE_MODE:-noaborted}"
+case "${EVAL_SCORE_MODE}" in
+  official)  _T=0.6; _P=0.95; _K=20 ;;
+  noaborted) _T=0.0; _P=1.0;  _K=1  ;;
+  *) echo "ERROR: EVAL_SCORE_MODE must be official|noaborted, got '${EVAL_SCORE_MODE}'"; exit 9 ;;
+esac
+export EVAL_TEMPERATURE="${EVAL_TEMPERATURE:-${_T}}"
+export EVAL_TOP_P="${EVAL_TOP_P:-${_P}}"
+export EVAL_TOP_K="${EVAL_TOP_K:-${_K}}"
+export JUDGE_TIMEOUT_SECS="${JUDGE_TIMEOUT_SECS:-120}"   # paper Table 8
 echo "=== eval config ==="
 echo "BENCH=${BENCH} PROTOCOL=${EVAL_PROTOCOL} TASK_FILE=${TASK_FILE} TASKS=$(wc -l < "${TASK_FILE}")"
 echo "CKPT=${CKPT}"
 echo "OUTPUT_ROOT=${OUTPUT_ROOT}"
 echo "n_parallel=${SLIME_BROWSER_SANDBOX_MAX_SANDBOXES} env_mode=${SLIME_BROWSER_ENV_MODE}"
 echo "task_indices=${TASK_INDICES:-<all>}"
+echo "score_mode=${EVAL_SCORE_MODE} temp=${EVAL_TEMPERATURE} top_p=${EVAL_TOP_P} top_k=${EVAL_TOP_K} judge_timeout=${JUDGE_TIMEOUT_SECS}"
 echo "==================="
 
 bash "${OPENWEBRL_ROOT}/scripts/run_evaluation.sh"

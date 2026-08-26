@@ -184,6 +184,18 @@ python -m playwright install chromium || playwright install chromium
 # micro-batching unchanged.
 RL_MAX_TOKENS_PER_GPU="${RL_MAX_TOKENS_PER_GPU:-}"
 
+# ---- sglang attention backend (SGLANG_ATTENTION_BACKEND) ---------------------
+# sglang leaves attention_backend=None and auto-selects. On Blackwell it picks the
+# TRTLLM paged-attention decode path, which calls sgl_kernel's
+# trtllm_paged_attention_decode. In this image sglang is 0.5.6.post2 (OpenWebRL's
+# requirements downgrade it from the base's 0.5.9) while the sm_103 sgl-kernel is
+# built from the v0.5.9 source tree, so that op's signature does not match and
+# SGLangEngine.init() dies with "Mismatched number of arguments". H100 never hit
+# this because the TRTLLM decode path is Blackwell-only.
+#
+# Forcing a backend that does not use that op avoids it. Empty = sglang's default.
+SGLANG_ATTENTION_BACKEND="${SGLANG_ATTENTION_BACKEND:-}"
+
 # ---- Rollout task timeout ----------------------------------------------------
 # Paper Table 7 sets "Rollout task timeout 600 s", but that assumes a Kubernetes
 # sandbox whose browser is ready in ~1 s. In local_process the env_server is cold
@@ -231,6 +243,11 @@ diff "${SRC}" "${RUN}" || true
 echo "=================================================================="
 echo "save_dir=${SLIME_SAVE_DIR}  resume_from=${SLIME_LOAD_CHECKPOINT:-<none>}"
 echo "browser concurrency=${SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES}  judge=${JUDGE_MODEL}"
-echo "stage=${RL_STAGE}  num_rollout=${NUM_ROLLOUT}  max_steps=${BROWSER_MAX_STEPS}  lr=${RL_LR}  recompute=${RL_RECOMPUTE}  eval_interval=${EVAL_INTERVAL}  task_timeout=${ROLLOUT_TASK_TIMEOUT}  max_tokens_per_gpu=${RL_MAX_TOKENS_PER_GPU:-<static>}"
+echo "stage=${RL_STAGE}  num_rollout=${NUM_ROLLOUT}  max_steps=${BROWSER_MAX_STEPS}  lr=${RL_LR}  recompute=${RL_RECOMPUTE}  eval_interval=${EVAL_INTERVAL}  task_timeout=${ROLLOUT_TASK_TIMEOUT}  max_tokens_per_gpu=${RL_MAX_TOKENS_PER_GPU:-<static>}  sglang_attn=${SGLANG_ATTENTION_BACKEND:-<auto>}"
+
+if [ -n "${SGLANG_ATTENTION_BACKEND}" ]; then
+  sed -i -e "s|   --sglang-log-level warning|   --sglang-attention-backend ${SGLANG_ATTENTION_BACKEND}\n   --sglang-log-level warning|" "${RUN}"
+  grep -n "sglang-attention-backend" "${RUN}" || { echo "ERROR: failed to inject sglang attention backend"; exit 7; }
+fi
 
 bash "${RUN}"
