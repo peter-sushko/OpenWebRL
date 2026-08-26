@@ -163,6 +163,7 @@ SRC="${OPENWEBRL_ROOT}/scripts/run_browser_Qwen3VL_4B_Instruct.sh"
 RUN="${OPENWEBRL_ROOT}/scripts/run_browser_Qwen3VL_4B_repro.sh"
 cp "${SRC}" "${RUN}"
 sed -i -e "s|^set -ex$|set -e|" \
+       -e '/--wandb-key "${WANDB_API_KEY}"/d' \
        -e "s|--wandb-project slime-dev|--wandb-project ${WANDB_PROJECT_NAME}|" \
        -e "s|--num-rollout 100|--num-rollout ${NUM_ROLLOUT}|" \
        -e "s|--lr 5e-7|--lr ${RL_LR}|" \
