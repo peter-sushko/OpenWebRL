@@ -30,3 +30,32 @@ try:
 except Exception as e:
     print("TE linear FAIL", type(e).__name__, str(e)[:300])
 PY
+
+# Importing a custom-kernel package proves nothing: sgl_kernel ships precompiled
+# cubins, so on an arch it was not built for (B300 = sm_103) the import succeeds
+# and the first real call dies with "no kernel image is available for execution
+# on the device". EXECUTE one kernel from each such package.
+python3 - <<'EOF'
+import torch
+def check(label, fn):
+    try:
+        fn(); print("EXEC OK", label)
+    except Exception as e:
+        print("EXEC FAIL", label, type(e).__name__, str(e)[:160])
+
+x = torch.randn(8, 4096, dtype=torch.bfloat16, device="cuda")
+w = torch.randn(4096, dtype=torch.bfloat16, device="cuda")
+
+def rms():
+    import sgl_kernel
+    out = torch.empty_like(x)
+    sgl_kernel.rmsnorm(out, x, w, 1e-6)   # the exact op that failed on B300
+    torch.cuda.synchronize()
+check("sgl_kernel.rmsnorm", rms)
+
+def fa():
+    from flash_attn import flash_attn_func
+    q = torch.randn(1, 128, 8, 128, dtype=torch.bfloat16, device="cuda")
+    flash_attn_func(q, q, q); torch.cuda.synchronize()
+check("flash_attn_func", fa)
+EOF

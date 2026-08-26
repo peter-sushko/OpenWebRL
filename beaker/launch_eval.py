@@ -12,9 +12,14 @@ Usage:
   # a local checkpoint, one benchmark
   python beaker/launch_eval.py --ckpt /weka/.../OpenWebRL-4B-SFT --bench om2w
 
+  # a 12-task subset through Browserbase stealth browsers
+  python beaker/launch_eval.py --ckpt OpenWebRL/OpenWebRL-4B --bench webvoyager \
+      --env-mode browserbase --task-indices 227,239,469 --run-tag wv_blocked_bb
+
 Prereqs:
   - `beaker account login`
   - Secrets in the workspace: PS_OPENAI_API_KEY, PS_HF_TOKEN
+    (browserbase mode also needs PS_BROWSERBASE_API_KEY, PS_BROWSERBASE_PROJECT_ID)
 """
 import argparse
 import os
@@ -28,6 +33,27 @@ BENCHES = ("om2w", "webvoyager", "deepshop")
 def slug(ckpt: str) -> str:
     """Beaker experiment names allow [a-zA-Z0-9_.-] only."""
     return re.sub(r"[^A-Za-z0-9_.-]", "-", os.path.basename(ckpt.rstrip("/"))).lower()
+
+
+def browserbase_env_args(args):
+    """Extra gantry args for Browserbase mode; empty otherwise."""
+    if args.env_mode != "browserbase":
+        return []
+    return [
+        "--env", "SLIME_BROWSER_ENV_MODE=browserbase",
+        "--secret-env", "BROWSERBASE_API_KEY=" + args.browserbase_key_secret,
+        "--secret-env", "BROWSERBASE_PROJECT_ID=" + args.browserbase_project_secret,
+        "--env", "BROWSERBASE_PROXIES=" + ("true" if args.browserbase_proxies else "false"),
+    ]
+
+
+def env_mode_args(args):
+    """Extra gantry args for whichever non-default browser env mode is selected."""
+    if args.env_mode == "local_process":
+        return []
+    if args.env_mode == "browserbase":
+        return browserbase_env_args(args)
+    return sandbox_env_args(args)
 
 
 def sandbox_env_args(args):
@@ -57,8 +83,24 @@ def main():
     p.add_argument("--workspace", default="ai2/general-tool-use")
     p.add_argument("--gpus", type=int, default=8)
     p.add_argument("--priority", default="urgent")
-    p.add_argument("--env-mode", default="local_process", choices=("local_process", "sandbox"),
-                   help="Browser env mode. 'sandbox' uses Orchard pods (the paper's setting).")
+    p.add_argument("--env-mode", default="local_process",
+                   choices=("local_process", "sandbox", "browserbase"),
+                   help="Browser env mode. 'sandbox' uses Orchard pods (the paper's setting); "
+                        "'browserbase' uses remote stealth browsers with residential proxies.")
+    p.add_argument("--browserbase-key-secret", default="PS_BROWSERBASE_API_KEY",
+                   help="Beaker secret holding the Browserbase API key.")
+    p.add_argument("--browserbase-project-secret", default="PS_BROWSERBASE_PROJECT_ID",
+                   help="Beaker secret holding the Browserbase project id.")
+    p.add_argument("--no-browserbase-proxies", dest="browserbase_proxies",
+                   action="store_false",
+                   help="Disable Browserbase residential proxies (they bill per GB, but they "
+                        "are what changes the egress IP -- stealth alone does not).")
+    p.add_argument("--task-indices", default="",
+                   help="Comma-separated row indices of the task file to evaluate; empty runs "
+                        "the whole benchmark. Subset runs get their own output tree.")
+    p.add_argument("--run-tag", default="",
+                   help="Output subdirectory under outputs/eval/<ckpt>/ and experiment-name "
+                        "suffix. Defaults to the benchmark name.")
     p.add_argument("--sandbox-url", default=os.environ.get("SANDBOX_ORCHESTRATOR_URL", ""),
                    help="Orchard orchestrator base URL (sandbox mode).")
     p.add_argument("--sandbox-image", default=os.environ.get("BROWSER_SANDBOX_IMAGE", ""),
@@ -73,7 +115,7 @@ def main():
     for bench in benches:
         command = [
             "gantry", "run",
-            "--name", f"owrl_eval_{slug(args.ckpt)}_{bench}",
+            "--name", f"owrl_eval_{slug(args.ckpt)}_{args.run_tag or bench}",
             "--budget", args.budget,
             "--workspace", args.workspace,
             "--priority", args.priority,
@@ -88,7 +130,9 @@ def main():
             "--env", "OPENWEBRL_ROOT=" + OPENWEBRL_ROOT,
             "--env", "BENCH=" + bench,
             "--env", "CKPT=" + args.ckpt,
-            *sandbox_env_args(args),
+            *env_mode_args(args),
+            *(["--env", "TASK_INDICES=" + args.task_indices] if args.task_indices else []),
+            *(["--env", "RUN_TAG=" + args.run_tag] if args.run_tag else []),
             "--no-python",
             "--allow-dirty",
             "--", "bash", f"{OPENWEBRL_ROOT}/{args.script}",

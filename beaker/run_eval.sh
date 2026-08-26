@@ -69,7 +69,10 @@ case "${BENCH}" in
   *)
     echo "ERROR: BENCH must be om2w|webvoyager|deepshop, got '${BENCH}'"; exit 2 ;;
 esac
-export OUTPUT_ROOT="${OUTPUT_ROOT:-${OPENWEBRL_ROOT}/outputs/eval/${CKPT_SLUG}/${BENCH}}"
+# A subset run (TASK_INDICES set) must not land in the same tree as a full run,
+# or compute_eval_success_rate.py will average the two together.
+RUN_TAG="${RUN_TAG:-${BENCH}}"
+export OUTPUT_ROOT="${OUTPUT_ROOT:-${OPENWEBRL_ROOT}/outputs/eval/${CKPT_SLUG}/${RUN_TAG}}"
 mkdir -p "${OUTPUT_ROOT}"
 
 # ---- Judge: canonical per-protocol model, reached through the public OpenAI
@@ -87,6 +90,26 @@ export JUDGE_MODEL="${JUDGE_MODEL:-}"   # empty => protocol default (o4-mini om2
 # Orchard pods (the paper's setting). Sandbox mode additionally needs the Orchard
 # client on the path at ./sandbox/client -- already symlinked in this checkout. ----
 export SLIME_BROWSER_ENV_MODE="${SLIME_BROWSER_ENV_MODE:-local_process}"
+if [ "${SLIME_BROWSER_ENV_MODE}" = "browserbase" ]; then
+  # Browserbase: remote stealth Chromium over CDP, residential proxies, in-band
+  # CAPTCHA solving. This is the closest available stand-in for the paper's
+  # "Browser-Use Stealth Browsers". Sessions bill per browser-minute AND per GB
+  # of proxy egress, so keep n_parallel and the task set deliberate.
+  : "${BROWSERBASE_API_KEY:?browserbase mode requires BROWSERBASE_API_KEY}"
+  : "${BROWSERBASE_PROJECT_ID:?browserbase mode requires BROWSERBASE_PROJECT_ID}"
+  export BROWSERBASE_API_KEY BROWSERBASE_PROJECT_ID
+  export BROWSERBASE_PROXIES="${BROWSERBASE_PROXIES:-true}"
+  export BROWSERBASE_ADVANCED_STEALTH="${BROWSERBASE_ADVANCED_STEALTH:-true}"
+  export BROWSERBASE_SOLVE_CAPTCHAS="${BROWSERBASE_SOLVE_CAPTCHAS:-true}"
+  # Let the step budget end the episode, not the project's default session cap.
+  export BROWSERBASE_SESSION_TIMEOUT_S="${BROWSERBASE_SESSION_TIMEOUT_S:-1800}"
+  python -c "import browserbase" 2>/dev/null \
+    || pip install --no-cache-dir "browserbase==1.4.0" \
+    || { echo "ERROR: could not install the browserbase SDK"; exit 6; }
+  echo "browserbase mode: proxies=${BROWSERBASE_PROXIES} stealth=${BROWSERBASE_ADVANCED_STEALTH}"
+  # Release anything a previous aborted run left live before opening new sessions.
+  python -m openwebrl.env.browserbase_env --cleanup || true
+fi
 if [ "${SLIME_BROWSER_ENV_MODE}" = "sandbox" ]; then
   : "${SANDBOX_ORCHESTRATOR_URL:?sandbox mode requires SANDBOX_ORCHESTRATOR_URL}"
   : "${BROWSER_SANDBOX_IMAGE:?sandbox mode requires BROWSER_SANDBOX_IMAGE (registry the cluster can pull)}"
@@ -129,6 +152,7 @@ echo "BENCH=${BENCH} PROTOCOL=${EVAL_PROTOCOL} TASK_FILE=${TASK_FILE} TASKS=$(wc
 echo "CKPT=${CKPT}"
 echo "OUTPUT_ROOT=${OUTPUT_ROOT}"
 echo "n_parallel=${SLIME_BROWSER_SANDBOX_MAX_SANDBOXES} env_mode=${SLIME_BROWSER_ENV_MODE}"
+echo "task_indices=${TASK_INDICES:-<all>}"
 echo "==================="
 
 bash "${OPENWEBRL_ROOT}/scripts/run_evaluation.sh"

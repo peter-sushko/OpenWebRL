@@ -54,9 +54,18 @@ mkdir -p "${SLIME_SAVE_DIR}"
 # Stage 2 must resume from stage 1's last checkpoint: launch it with
 #   --resume-from <SLIME_SAVE_ROOT>/openwebrl_4b_grpo_repro_s1
 RL_STAGE="${RL_STAGE:-1}"
+# The learning rate is also per-stage. Paper Table 7 gives 1e-6 (constant
+# schedule) for the 4B browser config; the released launcher instead has
+# `--lr 5e-7  ###...###1e-6`. Its own commented DEFAULT_SAVE_DIR names explain
+# the discrepancy -- the active one is
+#   ..._maxstep20_..._trainstep30fromckpt59_lr5e-7
+# i.e. the script as released IS the stage-2 continuation (resumed from
+# checkpoint 59, 30 steps, lr lowered to 5e-7), while the commented
+# ..._maxstep15_..._frombase variant is the stage-1 shape. So: 1e-6 for stage 1,
+# 5e-7 for the stage-2 continuation.
 case "${RL_STAGE}" in
-  1) NUM_ROLLOUT="${NUM_ROLLOUT:-90}"; BROWSER_MAX_STEPS="${BROWSER_MAX_STEPS:-15}" ;;
-  2) NUM_ROLLOUT="${NUM_ROLLOUT:-50}"; BROWSER_MAX_STEPS="${BROWSER_MAX_STEPS:-30}" ;;
+  1) NUM_ROLLOUT="${NUM_ROLLOUT:-90}"; BROWSER_MAX_STEPS="${BROWSER_MAX_STEPS:-15}"; RL_LR="${RL_LR:-1e-6}" ;;
+  2) NUM_ROLLOUT="${NUM_ROLLOUT:-50}"; BROWSER_MAX_STEPS="${BROWSER_MAX_STEPS:-30}"; RL_LR="${RL_LR:-5e-7}" ;;
   *) echo "ERROR: RL_STAGE must be 1 or 2 (got '${RL_STAGE}')"; exit 6 ;;
 esac
 export BROWSER_MAX_STEPS
@@ -89,7 +98,9 @@ mkdir -p "${SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR}"
 export JUDGE_API_MODE="served"
 export JUDGE_API_BASE="${JUDGE_API_BASE:-https://api.openai.com}"
 export JUDGE_MODEL="${JUDGE_MODEL:-gpt-4.1}"
+set +x  # the `:` guard below is traced too, and would echo the key
 : "${OPENAI_API_KEY:?OPENAI_API_KEY must be injected as a gantry secret-env}"
+set -x
 
 # ---- Image packaging workaround: base image ships mismatched flashinfer
 # (0.5.3) vs flashinfer-jit-cache (0.6.3). ----
@@ -110,6 +121,23 @@ export FLASHINFER_DISABLE_VERSION_CHECK=1
 # (Confirmed the hard way: it killed run v2 at engine init.)
 export SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.6}"
 
+# ---- Optional: activation recompute (RL_RECOMPUTE=1) --------------------------
+# Lets the run fit on H100 (80 GiB), where three earlier attempts OOM'd in the
+# Megatron backward pass -- the last one needed only 70 MiB more. Recompute is
+# mathematically identical: same gradients, same update, activations are just
+# recomputed in the backward instead of stored. It costs step time (~30-40%),
+# nothing else, so an H100 arm here is a scheduling fallback, not a deviation in
+# results. The launcher ships these three flags commented out at :471-473.
+RL_RECOMPUTE="${RL_RECOMPUTE:-0}"
+
+# ---- Eval cadence (pure observation, no effect on the trained model) ---------
+# The launcher evals every 5 iterations on the full WebVoyager val set. Measured
+# on jupiter: one eval pass = ~80 min (428 tasks judged in 61 min, ~7/min), so at
+# interval 5 over 90 iterations that is ~18 passes = ~24 h of pure eval on top of
+# training. The paper does not specify an eval interval, and eval never touches
+# the weights, so raising this costs only monitoring resolution.
+EVAL_INTERVAL="${EVAL_INTERVAL:-5}"
+
 # ---- W&B ----
 export WANDB_ENTITY="${WANDB_ENTITY:-ai2-llm}"
 WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-molmoweb}"
@@ -118,9 +146,13 @@ WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-molmoweb}"
 echo "Probing outbound web access..."
 curl -sS --connect-timeout 10 --max-time 20 -o /dev/null -w "example.com -> %{http_code}\n" https://example.com \
   || { echo "ERROR: no outbound web access; local_process rollouts cannot browse. Aborting."; exit 3; }
+# xtrace off around the judge probe: with set -x the Bearer token lands in the
+# Beaker logs in plaintext, readable by anyone with workspace access.
+set +x
 curl -sS --connect-timeout 10 --max-time 20 -o /dev/null -w "openai -> %{http_code}\n" \
   -H "Authorization: Bearer ${OPENAI_API_KEY}" https://api.openai.com/v1/models \
-  || { echo "ERROR: judge endpoint unreachable. Aborting."; exit 4; }
+  || { echo "ERROR: judge endpoint unreachable. Aborting."; set -x; exit 4; }
+set -x
 
 # ---- Chromium for Playwright ----
 python -m playwright install chromium || playwright install chromium
@@ -130,14 +162,22 @@ python -m playwright install chromium || playwright install chromium
 SRC="${OPENWEBRL_ROOT}/scripts/run_browser_Qwen3VL_4B_Instruct.sh"
 RUN="${OPENWEBRL_ROOT}/scripts/run_browser_Qwen3VL_4B_repro.sh"
 cp "${SRC}" "${RUN}"
-sed -i -e "s|--wandb-project slime-dev|--wandb-project ${WANDB_PROJECT_NAME}|" \
-       -e "s|--num-rollout 100|--num-rollout ${NUM_ROLLOUT}|" "${RUN}"
+sed -i -e "s|^set -ex$|set -e|" \
+       -e "s|--wandb-project slime-dev|--wandb-project ${WANDB_PROJECT_NAME}|" \
+       -e "s|--num-rollout 100|--num-rollout ${NUM_ROLLOUT}|" \
+       -e "s|--lr 5e-7|--lr ${RL_LR}|" \
+       -e "s|--eval-interval 5|--eval-interval ${EVAL_INTERVAL}|" "${RUN}"
+if [ "${RL_RECOMPUTE}" = "1" ]; then
+  sed -i -e "s|# --recompute-granularity full|--recompute-granularity full|" \
+         -e "s|# --recompute-method uniform|--recompute-method uniform|" \
+         -e "s|# --recompute-num-layers 1|--recompute-num-layers 1|" "${RUN}"
+fi
 
-echo "=== repro launcher diff vs canonical (W&B project + num-rollout) ==="
+echo "=== repro launcher diff vs canonical (xtrace off + W&B project + num-rollout + lr) ==="
 diff "${SRC}" "${RUN}" || true
 echo "=================================================================="
 echo "save_dir=${SLIME_SAVE_DIR}  resume_from=${SLIME_LOAD_CHECKPOINT:-<none>}"
 echo "browser concurrency=${SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES}  judge=${JUDGE_MODEL}"
-echo "stage=${RL_STAGE}  num_rollout=${NUM_ROLLOUT}  max_steps=${BROWSER_MAX_STEPS}"
+echo "stage=${RL_STAGE}  num_rollout=${NUM_ROLLOUT}  max_steps=${BROWSER_MAX_STEPS}  lr=${RL_LR}  recompute=${RL_RECOMPUTE}  eval_interval=${EVAL_INTERVAL}"
 
 bash "${RUN}"
