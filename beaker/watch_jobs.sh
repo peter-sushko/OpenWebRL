@@ -27,8 +27,13 @@ while read -r id label; do
   # Normalise to a single token: beaker prints e.g. "1 pending", and a state with
   # a space breaks the "$st $n $stalls" state file (read misaligns the fields, so
   # change detection never fires and every check re-prints).
-  st=$(beaker experiment get "$id" 2>/dev/null | tail -1 \
-       | grep -oE "[0-9]+ (succeeded|failed|running|pending|starting|preempted|canceled)" | tail -1 | tr ' ' '_')
+  # A retried experiment reports both states at once, e.g. "1 preempted by
+  # system, 1 pending". Report the live one -- a preempted job that beaker has
+  # already re-queued is not a crash to alert on.
+  raw=$(beaker experiment get "$id" 2>/dev/null | tail -1)
+  st=$(printf '%s' "$raw" | grep -oE "[0-9]+ (running|starting|pending)" | tail -1 | tr ' ' '_')
+  [ -z "$st" ] && st=$(printf '%s' "$raw" \
+       | grep -oE "[0-9]+ (succeeded|failed|preempted|canceled)" | tail -1 | tr ' ' '_')
   [ -z "$st" ] && st="unknown"
   LG=$(beaker experiment logs "$id" 2>/dev/null)
   n=$(printf '%s' "$LG" | wc -l)
