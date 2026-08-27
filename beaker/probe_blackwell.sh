@@ -48,9 +48,12 @@ w = torch.randn(4096, dtype=torch.bfloat16, device="cuda")
 
 def rms():
     import sgl_kernel
-    out = torch.empty_like(x)
-    sgl_kernel.rmsnorm(out, x, w, 1e-6)   # the exact op that failed on B300
+    # Call through the registered op and let torch bind the args, so a signature
+    # change in sgl_kernel does not masquerade as a kernel failure.
+    out = torch.ops.sgl_kernel.rmsnorm.default(x, w, 1e-6, False) \
+          if hasattr(torch.ops.sgl_kernel.rmsnorm, "default") else sgl_kernel.rmsnorm(x, w, 1e-6)
     torch.cuda.synchronize()
+    assert out is not None
 check("sgl_kernel.rmsnorm", rms)
 
 def fa():
@@ -60,27 +63,59 @@ def fa():
 check("flash_attn_func", fa)
 EOF
 
-# Triton JITs at runtime, so it must recognise the arch. sglang uses Triton
-# kernels on several paths, and the OpenWebRL CUDA-13 image path pulls a patched
-# Triton fork specifically for newer Blackwell -- so verify a real JIT compile +
-# launch on this device rather than assuming.
-python3 - <<'EOF'
-import torch
-try:
-    import triton, triton.language as tl
-    print("triton", triton.__version__)
+# Triton JITs at runtime, so it must recognise the arch. @jit functions cannot be
+# defined on stdin ("@jit functions should be defined in a Python file"), so write
+# the test to a real file before running it.
+cat > /tmp/_triton_probe.py <<'EOF'
+import torch, triton, triton.language as tl
 
-    @triton.jit
-    def _add1(p, n, BLOCK: tl.constexpr):
-        off = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-        m = off < n
-        tl.store(p + off, tl.load(p + off, mask=m) + 1.0, mask=m)
+@triton.jit
+def _add1(p, n, BLOCK: tl.constexpr):
+    off = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    m = off < n
+    tl.store(p + off, tl.load(p + off, mask=m) + 1.0, mask=m)
 
-    x = torch.zeros(4096, device="cuda", dtype=torch.float32)
-    _add1[(4,)](x, x.numel(), BLOCK=1024)
-    torch.cuda.synchronize()
-    assert torch.allclose(x, torch.ones_like(x)), "triton kernel wrote wrong values"
-    print("EXEC OK triton jit")
-except Exception as e:
-    print("EXEC FAIL triton jit", type(e).__name__, str(e)[:200])
+print("triton", triton.__version__)
+x = torch.zeros(4096, device="cuda", dtype=torch.float32)
+_add1[(4,)](x, x.numel(), BLOCK=1024)
+torch.cuda.synchronize()
+assert torch.allclose(x, torch.ones_like(x)), "triton kernel wrote wrong values"
+print("EXEC OK triton jit")
 EOF
+python3 /tmp/_triton_probe.py 2>&1 | tail -3 || echo "EXEC FAIL triton jit"
+
+# TorchMemorySaver is what --colocate relies on to hand GPU memory back and forth
+# between sglang and Megatron. On B300 the RL run completes cuda-graph capture and
+# then hangs forever without ever logging "Rollout offload succeeded", with the
+# same behaviour under two different attention backends -- so test pause/resume
+# directly here rather than inferring it from an 8-GPU hang.
+cat > /tmp/_tms_probe.py <<'EOF'
+import torch, time
+try:
+    from torch_memory_saver import torch_memory_saver as tms
+except Exception:
+    try:
+        import torch_memory_saver as _m
+        tms = getattr(_m, "torch_memory_saver", _m)
+    except Exception as e:
+        print("EXEC FAIL torch_memory_saver import", type(e).__name__, str(e)[:120]); raise SystemExit(0)
+
+free0 = torch.cuda.mem_get_info()[0] / 2**30
+try:
+    with tms.region():
+        buf = torch.empty(2 * 1024**3 // 2, dtype=torch.float16, device="cuda")  # ~2 GiB
+    torch.cuda.synchronize()
+    held = torch.cuda.mem_get_info()[0] / 2**30
+    t0 = time.time()
+    tms.pause()
+    torch.cuda.synchronize()
+    after_pause = torch.cuda.mem_get_info()[0] / 2**30
+    tms.resume()
+    torch.cuda.synchronize()
+    dt = time.time() - t0
+    print(f"EXEC OK torch_memory_saver pause/resume in {dt:.2f}s "
+          f"(free GiB: start {free0:.1f} -> alloc {held:.1f} -> paused {after_pause:.1f})")
+except Exception as e:
+    print("EXEC FAIL torch_memory_saver", type(e).__name__, str(e)[:160])
+EOF
+timeout 300 python3 /tmp/_tms_probe.py 2>&1 | tail -4 || echo "EXEC FAIL torch_memory_saver TIMEOUT(300s) -- this is the --colocate blocker"
