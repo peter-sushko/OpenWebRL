@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hourly health check for OpenWebRL Beaker jobs.
+# Periodic health check for OpenWebRL Beaker jobs (driven every 15 min).
 #
 # Prints one line per job in outputs/rl_full/_launched/JOBS (one "<id> <label>"
 # per line, '#' comments allowed), plus a line for anything that needs attention.
@@ -11,9 +11,12 @@
 #   * a crash signature in the logs while still "running"
 #   * a silent hang: log has not grown since the previous check while running
 #     (the B300 runs hung for 1-2h after cuda-graph capture with no output and no
-#     non-zero exit, so exit codes alone miss it)
+#     non-zero exit, so exit codes alone miss it). STALL_CHECKS sets how many
+#     frozen checks count as a hang.
 set -u
 STATE_DIR="${STATE_DIR:-/tmp/owrl_watch}"
+# Number of consecutive checks with a frozen log before calling it a hang.
+STALL_CHECKS="${STALL_CHECKS:-8}"
 JOBS_FILE="${JOBS_FILE:-/weka/oe-training-default/new_peters/OpenWebRL/outputs/rl_full/_launched/JOBS}"
 mkdir -p "$STATE_DIR"
 
@@ -48,7 +51,7 @@ while read -r id label; do
     *running*)
       if [ "$n" -eq "$prev_n" ]; then
         stalls=$((stalls+1))
-        [ "$stalls" -ge 2 ] && [ -z "$alert" ] && alert="SILENT_${stalls}h (log frozen at $n lines)"
+        [ "$stalls" -ge "$STALL_CHECKS" ] && [ -z "$alert" ] && alert="SILENT x$stalls checks (log frozen at $n lines)"
       else stalls=0; fi;;
     *) stalls=0;;
   esac
