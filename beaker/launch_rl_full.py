@@ -84,6 +84,10 @@ def main():
     p.add_argument("--eval-interval", type=int, default=0,
                    help="Iterations between WebVoyager eval passes (launcher default 5). "
                         "~80 min per pass; raising it only costs monitoring resolution.")
+    p.add_argument("--disable-cuda-graph", action="store_true",
+                   help="Skip sglang cuda-graph capture. On B300 the run freezes during capture.")
+    p.add_argument("--cuda-graph-max-bs", type=int, default=0,
+                   help="Cap the largest cuda-graph batch size instead of disabling graphs.")
     p.add_argument("--sglang-attention-backend", default="",
                    help="Force sglang's attention backend (e.g. triton). Needed on Blackwell, "
                         "where the auto-selected TRTLLM decode path calls an sgl_kernel op whose "
@@ -128,6 +132,9 @@ def main():
           if args.max_tokens_per_gpu else []),
         *(["--env", "SGLANG_ATTENTION_BACKEND=" + args.sglang_attention_backend]
           if args.sglang_attention_backend else []),
+        *(["--env", "SGLANG_DISABLE_CUDA_GRAPH=1"] if args.disable_cuda_graph else []),
+        *(["--env", "SGLANG_CUDA_GRAPH_MAX_BS=" + str(args.cuda_graph_max_bs)]
+          if args.cuda_graph_max_bs else []),
         *(["--env", "EVAL_INTERVAL=" + str(args.eval_interval)] if args.eval_interval else []),
         *(["--env", "SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES=" + str(args.browser_concurrency)]
           if args.browser_concurrency else []),

@@ -196,6 +196,19 @@ if [ -x /usr/local/cuda/bin/ptxas ]; then
   echo "TRITON_PTXAS_PATH=${TRITON_PTXAS_PATH} ($(/usr/local/cuda/bin/ptxas --version 2>/dev/null | tail -1))"
 fi
 
+# ---- sglang CUDA graphs (SGLANG_DISABLE_CUDA_GRAPH) --------------------------
+# On B300 the run freezes DURING cuda-graph capture: engines sit at different
+# batch sizes (bs=1 at 100%, bs=12 at 50%) and the log goes silent for hours,
+# never reaching the health_monitor / "Rollout offload succeeded" lines that
+# follow capture on H100. With flashinfer's AOT cache removed, every new capture
+# shape triggers a JIT compile, which makes capture the expensive step.
+#
+# Setting this to 1 skips capture entirely: slower decoding, but it isolates
+# whether capture is the blocker. SGLANG_CUDA_GRAPH_MAX_BS is the middle ground --
+# keep graphs but cap the shapes that must be captured.
+SGLANG_DISABLE_CUDA_GRAPH="${SGLANG_DISABLE_CUDA_GRAPH:-0}"
+SGLANG_CUDA_GRAPH_MAX_BS="${SGLANG_CUDA_GRAPH_MAX_BS:-}"
+
 # ---- sglang attention backend (SGLANG_ATTENTION_BACKEND) ---------------------
 # sglang leaves attention_backend=None and auto-selects. On Blackwell it picks the
 # TRTLLM paged-attention decode path, which calls sgl_kernel's
@@ -255,7 +268,15 @@ diff "${SRC}" "${RUN}" || true
 echo "=================================================================="
 echo "save_dir=${SLIME_SAVE_DIR}  resume_from=${SLIME_LOAD_CHECKPOINT:-<none>}"
 echo "browser concurrency=${SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES}  judge=${JUDGE_MODEL}"
-echo "stage=${RL_STAGE}  num_rollout=${NUM_ROLLOUT}  max_steps=${BROWSER_MAX_STEPS}  lr=${RL_LR}  recompute=${RL_RECOMPUTE}  eval_interval=${EVAL_INTERVAL}  task_timeout=${ROLLOUT_TASK_TIMEOUT}  max_tokens_per_gpu=${RL_MAX_TOKENS_PER_GPU:-<static>}  sglang_attn=${SGLANG_ATTENTION_BACKEND:-<auto>}"
+echo "stage=${RL_STAGE}  num_rollout=${NUM_ROLLOUT}  max_steps=${BROWSER_MAX_STEPS}  lr=${RL_LR}  recompute=${RL_RECOMPUTE}  eval_interval=${EVAL_INTERVAL}  task_timeout=${ROLLOUT_TASK_TIMEOUT}  max_tokens_per_gpu=${RL_MAX_TOKENS_PER_GPU:-<static>}  sglang_attn=${SGLANG_ATTENTION_BACKEND:-<auto>}  cudagraph_off=${SGLANG_DISABLE_CUDA_GRAPH}  graph_max_bs=${SGLANG_CUDA_GRAPH_MAX_BS:-<default>}"
+
+if [ "${SGLANG_DISABLE_CUDA_GRAPH}" = "1" ]; then
+  sed -i -e "s|   --sglang-log-level warning|   --sglang-disable-cuda-graph\n   --sglang-log-level warning|" "${RUN}"
+  grep -n "sglang-disable-cuda-graph" "${RUN}" || { echo "ERROR: failed to inject --sglang-disable-cuda-graph"; exit 8; }
+elif [ -n "${SGLANG_CUDA_GRAPH_MAX_BS}" ]; then
+  sed -i -e "s|   --sglang-log-level warning|   --sglang-cuda-graph-max-bs ${SGLANG_CUDA_GRAPH_MAX_BS}\n   --sglang-log-level warning|" "${RUN}"
+  grep -n "sglang-cuda-graph-max-bs" "${RUN}" || { echo "ERROR: failed to inject --sglang-cuda-graph-max-bs"; exit 8; }
+fi
 
 if [ -n "${SGLANG_ATTENTION_BACKEND}" ]; then
   sed -i -e "s|   --sglang-log-level warning|   --sglang-attention-backend ${SGLANG_ATTENTION_BACKEND}\n   --sglang-log-level warning|" "${RUN}"

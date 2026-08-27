@@ -107,7 +107,12 @@ if [ "${SLIME_BROWSER_ENV_MODE}" = "browser-use" ]; then
     echo "       Browser-Use concurrency cap of ${BU_MAX_CONCURRENCY}. Lower it."
     exit 8
   fi
-  echo "browser-use mode: n_parallel=${SLIME_BROWSER_SANDBOX_MAX_SANDBOXES} cap=${BU_MAX_CONCURRENCY}"
+  # Paper Table 8: browser viewport 1280x1000, DPR 1, coordinate scale 1000.
+  # Browser-Use stealth otherwise randomises this per session (~1280x744..788 at
+  # dpr 1..2), which puts the observation geometry out of the model's training
+  # distribution. Pin it. Set to "" to keep the remote fingerprint.
+  export BROWSER_USE_FORCE_VIEWPORT="${BROWSER_USE_FORCE_VIEWPORT-1280x1000}"
+  echo "browser-use mode: n_parallel=${SLIME_BROWSER_SANDBOX_MAX_SANDBOXES} cap=${BU_MAX_CONCURRENCY} viewport=${BROWSER_USE_FORCE_VIEWPORT:-<remote default>}"
   # Stop anything a previous aborted run left billing.
   python -m openwebrl.env.browser_use_env --cleanup || true
 fi
