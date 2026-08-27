@@ -55,6 +55,12 @@ while read -r id label; do
 
   echo "$st $n $stalls" > "$f"
 
+  # Report a terminal state once, not every hour: once it is recorded in the state
+  # file the alert would otherwise repeat forever for a job already dealt with.
+  if [ "$st" = "$prev_st" ]; then
+    case "$st" in *succeeded*|*failed*|*canceled*|*preempted*) alert="";; esac
+  fi
+
   if [ -n "$alert" ] || [ "$st" != "$prev_st" ]; then
     echo "[watch] ${label:-$id} = $st ${prog:+$prog} ${ck:+$ck} ${rew:+$rew} ${alert:+<< $alert}"
   fi

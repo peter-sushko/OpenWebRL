@@ -19,7 +19,17 @@
 # CMakeLists has the compute_103a gencode gated behind CUDA_VERSION >= 13.0;
 # nvcc 12.9 compiles sm_103a and supports --compress-mode=size in that branch, so
 # lowering the gate is enough and keeps the CUDA 12.9 base.
-ARG BASE=openwebrl-train-cu13:latest
+# BASE is the image whose sgl-kernel 0.3.21 was ALREADY rebuilt with sm_103
+# (docker/sm103). sglang 0.5.6.post2 needs files from BOTH kernel distributions:
+# sgl_per_tensor_quant_fp8 exists only in 0.3.x (removed by 0.4.1), while other
+# ops come from 0.4.0. requirements.txt installs 0.4.0 after the base's 0.3.21,
+# so the working image runs on the union of the two. Rebuilding either one alone
+# breaks the other half:
+#   0.3.21 alone -> "Mismatched number of arguments: trtllm_paged_attention_decode"
+#   0.4.0  alone -> "cannot import name 'sgl_per_tensor_quant_fp8'"
+# So layer the 0.4.0 sm_103 build on top of the 0.3.21 sm_103 build, preserving
+# the install order and giving both halves sm_103 cubins.
+ARG BASE=openwebrl-train-sm103:latest
 FROM ${BASE}
 
 ARG SGLANG_KERNEL_COMMIT=15097c5c3b528d9165ddc935d99c5fadef8cdcb5
