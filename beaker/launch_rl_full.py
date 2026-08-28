@@ -107,6 +107,11 @@ def main():
                         "would interleave checkpoint writes.")
     p.add_argument("--ckpt-step", type=int, default=0,
                    help="Iteration to resume from inside --resume-from (e.g. 90 for stage 2).")
+    p.add_argument("--min-runtime", default="2h",
+                   help="Guaranteed runtime before preemption. A non-zero value is what "
+                        "makes the job land on the workspace's allocated slots instead of "
+                        "unallocated backfill on holmes (which is preemptible at any time). "
+                        "2h matches the other allocated jobs in ai2/oe-agents-holmes.")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
@@ -117,6 +122,7 @@ def main():
         "--workspace", args.workspace,
         "--priority", args.priority,
         "--cluster", args.cluster,
+        "--min-runtime", args.min_runtime,
         "--gpus", str(args.gpus),
         "--shared-memory", "100GiB",
         "--weka", "oe-training-default:/weka/oe-training-default",
