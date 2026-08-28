@@ -60,6 +60,7 @@ _BROWSER_DIR = os.path.dirname(os.path.abspath(__file__))
 _EXPT_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 _SANDBOX_CLEANUP_DONE = False
 _BROWSER_USE_CLEANUP_DONE = False
+_BROWSERBASE_CLEANUP_DONE = False
 _BROWSER_ROLLOUT_GATE: asyncio.Semaphore | None = None
 _BROWSER_ROLLOUT_GATE_LIMIT: int | None = None
 _BROWSER_ROLLOUT_GATE_LOCK = asyncio.Lock()
@@ -719,10 +720,10 @@ def _apply_browser_env_mode_override(env_config: BrowserEnvConfig) -> BrowserEnv
     mode = os.environ.get("SLIME_BROWSER_ENV_MODE")
     if mode in (None, ""):
         return env_config
-    if mode not in {"local_process", "sandbox", "browser-use"}:
+    if mode not in {"local_process", "sandbox", "browser-use", "browserbase"}:
         raise ValueError(
             "Unsupported SLIME_BROWSER_ENV_MODE="
-            f"{mode!r}; expected one of local_process, sandbox, browser-use."
+            f"{mode!r}; expected one of local_process, sandbox, browser-use, browserbase."
         )
     merged_config = dict(env_config)
     merged_config["mode"] = mode
@@ -809,6 +810,7 @@ async def _create_env(
     - ``"sandbox"``: K8s sandbox pods via orchestrator + exec/curl
     - ``"local_process"``: local env_server subprocess + HTTP
     - ``"browser-use"``: drive a remote browser on cloud.browser-use.com via CDP
+    - ``"browserbase"``: drive a remote stealth browser on browserbase.com via CDP
 
     All config/task/policy data is loaded from the local filesystem and,
     in server-backed modes, sent to the env_server via the /reset request.
@@ -906,6 +908,45 @@ async def _create_env(
 
         return env, task_data
 
+    # ---- Browserbase mode: create a fresh remote stealth browser per environment ----
+    if mode == "browserbase":
+        browserbase_cfg = env_config.get("browserbase", {}) or {}
+
+        from openwebrl.env.browserbase_env import (
+            create_browserbase_env,
+            cleanup_existing_browserbase_sessions,
+        )
+
+        # Browserbase bills per browser-minute, so sweep any sessions left live
+        # by a previous aborted run before opening new ones.
+        global _BROWSERBASE_CLEANUP_DONE
+        if not _BROWSERBASE_CLEANUP_DONE:
+            await cleanup_existing_browserbase_sessions(browserbase_cfg)
+            _BROWSERBASE_CLEANUP_DONE = True
+
+        env = None
+        try:
+            env = await create_browserbase_env(
+                browserbase_cfg=browserbase_cfg,
+                env_config=env_config,
+                tool_list=tool_list,
+                policy=policy,
+                start_url=task_data["start_url"],
+            )
+        except BaseException:
+            if env is not None:
+                try:
+                    await env.exit()
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Task %s: failed to clean up browserbase env during initialization: %s",
+                        task_id,
+                        cleanup_exc,
+                    )
+            raise
+
+        return env, task_data
+
     # ---- Local-process mode: fresh local env_server subprocess per environment ----
     if mode == "local_process":
         local_cfg = env_config.get("local_process", {})
@@ -936,7 +977,7 @@ async def _create_env(
 
         return env, task_data
 
-    raise ValueError(f"Unsupported browser env mode={mode!r}; expected one of sandbox, local_process, browser-use.")
+    raise ValueError(f"Unsupported browser env mode={mode!r}; expected one of sandbox, local_process, browser-use, browserbase.")
 
 async def _initialize_resources(args: Any, task_id: str, task_metadata: dict[str, Any] | None = None):
     """Initialize adapter, generate state, and server URL."""
@@ -1497,7 +1538,8 @@ async def _generate_trajectory_sample_impl(
 
             # Check max context length to avoid exceeding the LLM's context window.
             max_ctx_len = getattr(args, "rollout_max_context_len", None)
-            if max_ctx_len and (len(user_delta) + len(sample.tokens)) > max_ctx_len:
+            reserved = int(sampling_params.get("max_new_tokens", 0) or 0)
+            if max_ctx_len and (len(user_delta) + len(sample.tokens) + reserved) > max_ctx_len:
                 logger.info(f"Step {step}: total length {len(user_delta)} exceeds max_context_len {max_ctx_len}, truncating.")
                 sample.status = Sample.Status.TRUNCATED
                 sample.metadata["terminate_reason"] = "rollout_max_context_length_exceeded"
@@ -1812,10 +1854,14 @@ async def _generate_turn_sample_impl(
                 processor, tokenizer, input_text, img_list
             )
 
-            # Check max context length
+            # Check max context length. SGLang rejects a request whose input plus
+            # max_new_tokens exceeds the served context window, so reserve the
+            # completion budget here -- otherwise the guard passes and the server
+            # answers 400, which the retry loop turns into a hard rollout failure.
             max_ctx_len = getattr(args, "rollout_max_context_len", None)
-            if max_ctx_len and (len(input_tokens) > max_ctx_len):
-                logger.info(f"Step {step}: turn input length {len(input_tokens)} exceeds max_context_len {max_ctx_len}, stopping.")
+            reserved = int(sampling_params.get("max_new_tokens", 0) or 0)
+            if max_ctx_len and (len(input_tokens) + reserved > max_ctx_len):
+                logger.info(f"Step {step}: turn input length {len(input_tokens)} + {reserved} reserved exceeds max_context_len {max_ctx_len}, stopping.")
                 if turn_samples:
                     turn_samples[-1].metadata["is_last_turn"] = True
                     for ts in turn_samples:
@@ -1971,6 +2017,17 @@ async def _generate_turn_sample_impl(
                     ts.metadata["terminate_reason"] = "max_steps_exhausted"
                     ts.metadata["total_steps"] = getattr(args, "max_steps", 16)
         
+        if not turn_samples:
+            # Only reachable when the very first turn already exceeds
+            # rollout_max_context_len. Return a marked sample rather than [].
+            sample.status = Sample.Status.TRUNCATED
+            sample.metadata = sample.metadata or {}
+            sample.metadata["is_last_turn"] = True
+            sample.metadata["turn_index"] = 0
+            sample.metadata["terminate_reason"] = "generation_length_limit"
+            sample.metadata["total_steps"] = 0
+            turn_samples = [sample]
+
         num_turns_in_trajectory = len(turn_samples)
         for ts in turn_samples:
             ts.metadata["num_turns_in_trajectory"] = num_turns_in_trajectory
@@ -1995,6 +2052,10 @@ async def _generate_turn_sample_impl(
             sample.status = Sample.Status.ABORTED
             sample.metadata = sample.metadata or {}
             sample.metadata["is_last_turn"] = True
+            # The eval reward_funcs require turn_index on every sample; without
+            # it they raise instead of scoring 0, which hides this error behind
+            # a bogus "Expected a list of turn-level samples" ValueError.
+            sample.metadata["turn_index"] = 0
             sample.metadata["terminate_reason"] = f"generation_error: {e}"
             sample.metadata["total_steps"] = 0
             turn_samples = [sample]
@@ -2051,6 +2112,7 @@ async def generate_turn_sample(
             sample.status = Sample.Status.ABORTED
             sample.metadata = sample.metadata or {}
             sample.metadata["is_last_turn"] = True
+            sample.metadata["turn_index"] = 0
             sample.metadata["terminate_reason"] = f"generation_error: rollout_task_timeout after {timeout_secs}s"
             sample.metadata["total_steps"] = sample.metadata.get("total_steps", 0)
             return [_mark_remove_sample_if_needed(sample)]
