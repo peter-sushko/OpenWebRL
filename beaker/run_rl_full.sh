@@ -192,9 +192,16 @@ python -m playwright install chromium || playwright install chromium
 # activation memory only. Capping tokens per micro-batch bounds the logits
 # allocation directly. The launcher ships both flags commented out at :481-483.
 #
-# Unset on B200/B300, which have the headroom to run the launcher's static
-# micro-batching unchanged.
-RL_MAX_TOKENS_PER_GPU="${RL_MAX_TOKENS_PER_GPU:-}"
+# It is also the throughput knob, which is the reason it is now on by default.
+# With the launcher's static --micro-batch-size 1, iteration 0 measured 34
+# TFLOPS/GPU (~2% of a B300), 80 effective tokens/GPU/s, and train_wait_time 2261 s
+# against a 1909 s train phase: every rank idles until the longest single sample in
+# its step finishes. Dynamic batching packs samples up to a token budget instead of
+# one per step, which both fills the GPU and evens out the per-rank tail.
+#
+# 32768 with TP=4 on 288 GiB B300s. Lower it if the train phase OOMs; the logits
+# tensor is tokens x 151936, so memory scales linearly with this number.
+RL_MAX_TOKENS_PER_GPU="${RL_MAX_TOKENS_PER_GPU:-32768}"
 
 # ---- Triton must use the CUDA 12.9 ptxas, not its bundled 12.8 one -----------
 # Triton ships its own ptxas at triton/backends/nvidia/bin/ptxas. In this image
