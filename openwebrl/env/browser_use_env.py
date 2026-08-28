@@ -105,6 +105,25 @@ class BrowserUseWebEnv(WebEnv):
         self.cdp_url = cdp_url
         self.session_id = session_id
         self._bu_client = bu_client
+        # e.g. BROWSER_USE_FORCE_VIEWPORT="1280x1000"; unset leaves the remote
+        # fingerprint alone (the released behaviour).
+        self._forced_viewport = None
+        _fv = os.environ.get("BROWSER_USE_FORCE_VIEWPORT", "").strip().lower()
+        if _fv:
+            try:
+                _w, _h = _fv.split("x")
+                self._forced_viewport = (int(_w), int(_h))
+            except Exception:
+                logger.warning("Ignoring malformed BROWSER_USE_FORCE_VIEWPORT=%r", _fv)
+
+    async def _pin_viewport(self, page: Any) -> None:
+        if not self._forced_viewport:
+            return
+        w, h = self._forced_viewport
+        try:
+            await page.set_viewport_size({"width": w, "height": h})
+        except Exception as exc:
+            logger.warning("set_viewport_size(%dx%d) failed: %s", w, h, exc)
 
     async def setup(self) -> None:
         self.playwright = await async_playwright().start()
@@ -122,6 +141,36 @@ class BrowserUseWebEnv(WebEnv):
         # in WebEnv.execute_single_action relies on self.screen_size / self.dpr
         # matching the REAL viewport, or clicks land off-target. Realign to
         # whatever the remote actually gave us.
+        if self._forced_viewport:
+            # Coordinate transforms and the "screen size:" line in the observation
+            # both read screen_size/dpr; pin them to the values we forced so the
+            # model sees the trained 1280x1000 geometry.
+            fw, fh = self._forced_viewport
+            self.screen_size = (fw, fh)
+            self.dpr = 1
+            self.css_width, self.css_height = fw, fh
+            actual = await self.page.evaluate(
+                "() => ({w: window.innerWidth, h: window.innerHeight})"
+            )
+            aw, ah = int(actual["w"]), int(actual["h"])
+            if (aw, ah) != (fw, fh):
+                # Pinning a basis the browser did not honour would scale every
+                # click by fh/ah (~1.34) and put them off-target, which is worse
+                # than not pinning at all. Fall back to the real geometry and
+                # shout, so the run stays valid and the failure is visible.
+                logger.error(
+                    "VIEWPORT PIN FAILED: asked %dx%d, remote reports %dx%d; "
+                    "falling back to actual geometry (results are NOT the pinned condition).",
+                    fw, fh, aw, ah,
+                )
+                self.screen_size = (aw, ah)
+                self.css_width, self.css_height = aw, ah
+                self._forced_viewport = None
+                return
+            logger.info("BrowserUseWebEnv ready (session_id=%s, viewport pinned %dx%d)",
+                        self.session_id, fw, fh)
+            return
+
         try:
             dims = await self.page.evaluate(
                 "() => ({w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio})"
@@ -163,6 +212,18 @@ class BrowserUseWebEnv(WebEnv):
         )
         self.context.set_default_timeout(self.timeout)
 
+        # Browser-Use stealth randomises the fingerprint per session, so the
+        # remote viewport lands anywhere in ~1280x744..788 at dpr 1..2 instead of
+        # the 1280x1000 the model was trained on. page.set_viewport_size() does
+        # take effect over CDP here (verified: inner=1280x1000, screenshot
+        # 1280x1000 px), so pin it when asked. Opt-in: unset => released behaviour.
+        if self._forced_viewport:
+            fw, fh = self._forced_viewport
+            for page in self.context.pages:
+                await self._pin_viewport(page)
+            self.context.on("page", lambda p: asyncio.create_task(self._pin_viewport(p)))
+            logger.info("Pinned Browser-Use viewport to %dx%d", fw, fh)
+
         assert start_url
         start_urls = start_url.split(" |AND| ")
         existing_pages = list(self.context.pages)
@@ -173,7 +234,7 @@ class BrowserUseWebEnv(WebEnv):
                 try:
                     # Return as soon as the DOM is ready — waiting for "load"
                     # times out on sites with heavy third-party resources.
-                    await page.goto(url, timeout=self.timeout, wait_until="domcontentloaded")
+                    await page.goto(url, timeout=self.init_navigation_timeout, wait_until="domcontentloaded")
                     # Then best-effort wait for "load" so later page.evaluate
                     # calls don't race with in-flight client-side redirects.
                     try:
@@ -265,6 +326,11 @@ async def create_browser_use_env(
         "browser_screen_width": int(env_config["width"]) // dpr,
         "browser_screen_height": int(env_config["height"]) // dpr,
     }
+    # page.set_viewport_size() is a no-op over CDP unless the session was created
+    # resizable -- without this the pin silently fails and the remote keeps its
+    # randomised ~1280x744..788 fingerprint.
+    if os.environ.get("BROWSER_USE_FORCE_VIEWPORT", "").strip():
+        create_kwargs["allow_resizing"] = True
     for key in ("timeout", "profile_id"):
         if browser_use_cfg.get(key):
             create_kwargs[key] = browser_use_cfg[key]
