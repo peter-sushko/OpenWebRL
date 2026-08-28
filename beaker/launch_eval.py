@@ -36,6 +36,8 @@ BENCHES = ("om2w", "webvoyager", "deepshop")
 
 def slug(ckpt: str) -> str:
     """Beaker experiment names allow [a-zA-Z0-9_.-] only."""
+    if len(ckpt.split()) > 1:      # a sequential multi-checkpoint sweep
+        return "multi"
     return re.sub(r"[^A-Za-z0-9_.-]", "-", os.path.basename(ckpt.rstrip("/"))).lower()
 
 
@@ -91,7 +93,9 @@ def sandbox_env_args(args):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True,
-                   help="Local checkpoint dir or HuggingFace repo id.")
+                   help="Local checkpoint dir or HuggingFace repo id. May be a quoted, "
+                        "space-separated list, which is evaluated sequentially in one job "
+                        "(required when a cloud-browser concurrency cap is account-wide).")
     p.add_argument("--bench", default="all", choices=BENCHES + ("all",))
     p.add_argument("--image", default=os.environ.get("BEAKER_IMAGE", "peters/openwebrl-train"))
     p.add_argument("--script", default="beaker/run_eval.sh")
@@ -100,6 +104,9 @@ def main():
     p.add_argument("--workspace", default="ai2/general-tool-use")
     p.add_argument("--gpus", type=int, default=8)
     p.add_argument("--priority", default="urgent")
+    p.add_argument("--min-runtime", default="2h",
+                   help="Guaranteed runtime before preemption; non-zero is what puts the job "
+                        "on allocated slots instead of preemptible backfill.")
     p.add_argument("--env-mode", default="local_process",
                    choices=("local_process", "sandbox", "browserbase", "browser-use"),
                    help="Browser env mode. 'sandbox' uses Orchard pods; 'browser-use' uses the "
@@ -136,6 +143,10 @@ def main():
                    help="browser-env image in a registry the Orchard cluster can pull.")
     p.add_argument("--sandbox-key-secret", default="PS_SANDBOX_API_KEY",
                    help="Beaker secret holding the Orchard API key.")
+    p.add_argument("--ref", default="",
+                   help="Git ref to report to gantry. The job reads code from the Weka mount, "
+                        "so this is provenance only -- useful when HEAD in a shared checkout "
+                        "carries another session's unpushed commits.")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
@@ -149,6 +160,7 @@ def main():
             "--workspace", args.workspace,
             "--priority", args.priority,
             "--cluster", args.cluster,
+            "--min-runtime", args.min_runtime,
             "--gpus", str(args.gpus),
             "--shared-memory", "100GiB",
             "--weka", "oe-training-default:/weka/oe-training-default",
@@ -165,6 +177,7 @@ def main():
             *(["--env", "EVAL_SCORE_MODE=" + args.score_mode] if args.score_mode else []),
             *(["--env", "TASK_INDICES=" + args.task_indices] if args.task_indices else []),
             *(["--env", "RUN_TAG=" + args.run_tag] if args.run_tag else []),
+            *(["--ref", args.ref] if args.ref else []),
             "--no-python",
             "--allow-dirty",
             "--", "bash", f"{OPENWEBRL_ROOT}/{args.script}",
