@@ -1,29 +1,19 @@
 """Browserbase remote browser environment.
 
-Same shape as ``browser_use_env.py``: a ``WebEnv`` that attaches to a remote
-Chromium over CDP instead of launching one locally. Two things differ, and both
-are the reason this file exists at all:
+Same shape as ``browser_use_env.py``: a ``WebEnv`` attached to a remote Chromium
+over CDP. Sessions run with advanced stealth and residential proxies, so pages
+rarely serve a 403/CAPTCHA interstitial; when one is served Browserbase solves
+it in-band and announces it over the console, and we must sit still until it
+settles (``_wait_for_captcha_if_needed``).
 
-  * Browserbase sessions are created with ``advanced_stealth`` + residential
-    proxies, so the pages we hit are far less likely to serve a 403/CAPTCHA
-    interstitial than headless Chromium from a datacenter IP.
-  * When a CAPTCHA *is* served, Browserbase solves it in-band and announces the
-    fact through two console messages. We must sit completely still while that
-    happens -- see ``_wait_for_captcha_if_needed``.
+Advanced stealth pins the viewport to 1280x720 and ignores both
+``browser_settings.viewport`` and ``fingerprint.screen``; a CDP
+``setDeviceMetricsOverride`` resizes it but breaks ``page.screenshot``. So the
+paper's 1280x1000 and stealth are mutually exclusive -- we take stealth, and
+``setup()`` realigns screen_size/dpr so click coordinates stay correct.
 
-Measured behaviour worth knowing (2026-08-26, advanced stealth on):
-
-  * Browserbase pins the viewport to **1280x720** whenever ``advanced_stealth``
-    is on. ``browser_settings.viewport`` and ``fingerprint.screen`` are both
-    ignored; a CDP ``Emulation.setDeviceMetricsOverride`` does resize it but
-    then breaks ``page.screenshot``. With stealth off the requested viewport
-    (e.g. 1280x1000) is honoured. So matching the paper's observation size and
-    running stealth are mutually exclusive -- we take stealth, and ``setup()``
-    realigns ``screen_size``/``dpr`` so click coordinates stay correct.
-
-Cleanup mirrors the ``.sandboxes/`` / ``.browser_use_sessions/`` marker pattern:
-one empty file per live session, removed on release, swept at the start of the
-next run or via ``python -m openwebrl.env.browserbase_env --cleanup``.
+Live sessions are tracked with one marker file each, swept on the next run or
+via ``python -m openwebrl.env.browserbase_env --cleanup``.
 """
 
 import argparse

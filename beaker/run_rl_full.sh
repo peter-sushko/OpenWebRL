@@ -1,29 +1,8 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# In-container entry script: the FULL OpenWebRL-4B MM-GRPO reproduction run.
-#
-# Launched by beaker/launch_rl_full.py via `gantry run ... -- <this script>`.
-# One 8-GPU node. Unlike beaker/run_rl_smoke.sh this does NOT downscale the
-# launcher: --num-rollout 100, --rollout-batch-size 48, --n-samples-per-prompt 5,
-# --global-batch-size 256, --ppo-epochs 2, --lr 5e-7, --max-steps 30, starting
-# from OpenWebRL/OpenWebRL-4B-SFT. Those are the released launcher defaults, i.e.
-# the paper's 4B configuration.
-#
-# Only two things are patched, both site-specific:
-#   1. W&B entity/project -> ai2-llm/molmoweb (the launcher hardcodes the
-#      authors' yangrui_rl/slime-dev, which our key cannot write to).
-#   2. Judge -> `served` against the public OpenAI API (the launcher defaults to
-#      Azure `token` mode). The judge MODEL stays gpt-4.1, as in the paper.
-#
-# The one genuine deviation from the paper is SLIME_BROWSER_ENV_MODE: the paper
-# runs `sandbox` (Orchard K8s pods, per-episode network isolation) with a pool of
-# 90; we have no cluster, so this runs `local_process` with the same 90-way
-# concurrency. Throughput matches (the node ceiling is ~128) but network
-# isolation does not, so expect a higher website block rate.
-#
-# Resumable: --save-interval 5 writes iter_* dirs under SLIME_SAVE_ROOT. To
-# resume after preemption, re-launch with SLIME_LOAD_CHECKPOINT=<save-dir>.
-# ==============================================================================
+# In-container entry point for the full OpenWebRL-4B MM-GRPO run, launched by
+# beaker/launch_rl_full.py on one 8-GPU node. Keeps the released launcher's
+# hyperparameters; patches only W&B (ai2-llm/molmoweb) and the judge (served
+# OpenAI instead of Azure). Resume a preempted run with SLIME_LOAD_CHECKPOINT.
 set -euo pipefail
 set -x
 
@@ -44,25 +23,11 @@ export SLIME_LOAD_CHECKPOINT="${SLIME_LOAD_CHECKPOINT:-}"
 export SLIME_SAVE_DIR="${SLIME_SAVE_DIR:-${SLIME_SAVE_ROOT}/openwebrl_4b_grpo_repro_s${RL_STAGE}}"
 mkdir -p "${SLIME_SAVE_DIR}"
 
-# ---- Paper's two-stage rollout-step schedule ----------------------------------
-# The paper trains "90 iterations with a maximum of 15 rollout steps, followed by
-# 50 iterations with a maximum of 30 rollout steps". The released launcher instead
-# hardcodes a flat --num-rollout 100 at --max-steps 30, which matches neither
-# stage, so we drive both from RL_STAGE and patch the two values into the
-# throwaway launcher copy below.
-#
-# Stage 2 must resume from stage 1's last checkpoint: launch it with
-#   --resume-from <SLIME_SAVE_ROOT>/openwebrl_4b_grpo_repro_s1
+# ---- Paper's two-stage rollout schedule: 90 iters @ 15 steps, then 50 @ 30.
+# The released launcher is flat (100 @ 30) and its save-dir names show it is
+# really the stage-2 continuation, hence the per-stage lr. Stage 2 must resume
+# from stage 1: --resume-from <SLIME_SAVE_ROOT>/openwebrl_4b_grpo_repro_s1
 RL_STAGE="${RL_STAGE:-1}"
-# The learning rate is also per-stage. Paper Table 7 gives 1e-6 (constant
-# schedule) for the 4B browser config; the released launcher instead has
-# `--lr 5e-7  ###...###1e-6`. Its own commented DEFAULT_SAVE_DIR names explain
-# the discrepancy -- the active one is
-#   ..._maxstep20_..._trainstep30fromckpt59_lr5e-7
-# i.e. the script as released IS the stage-2 continuation (resumed from
-# checkpoint 59, 30 steps, lr lowered to 5e-7), while the commented
-# ..._maxstep15_..._frombase variant is the stage-1 shape. So: 1e-6 for stage 1,
-# 5e-7 for the stage-2 continuation.
 case "${RL_STAGE}" in
   1) NUM_ROLLOUT="${NUM_ROLLOUT:-90}"; BROWSER_MAX_STEPS="${BROWSER_MAX_STEPS:-15}"; RL_LR="${RL_LR:-1e-6}" ;;
   2) NUM_ROLLOUT="${NUM_ROLLOUT:-50}"; BROWSER_MAX_STEPS="${BROWSER_MAX_STEPS:-30}"; RL_LR="${RL_LR:-5e-7}" ;;
@@ -76,10 +41,8 @@ export HF_HOME="${HF_HOME:-/weka/oe-training-default/new_peters/cache/hf}"
 export HF_HUB_OFFLINE=0
 export TRANSFORMERS_OFFLINE=0
 
-# ---- Browser env mode. Defaults to local_process; set SLIME_BROWSER_ENV_MODE=sandbox
-# plus SANDBOX_ORCHESTRATOR_URL / SANDBOX_API_KEY / BROWSER_SANDBOX_IMAGE to use
-# Orchard pods (the paper's setting). Sandbox mode additionally needs the Orchard
-# client on the path at ./sandbox/client -- already symlinked in this checkout. ----
+# ---- Browser env mode. sandbox (the paper's setting) needs the Orchard client
+# symlinked at ./sandbox/client plus the three SANDBOX_* vars. ----
 export SLIME_BROWSER_ENV_MODE="${SLIME_BROWSER_ENV_MODE:-local_process}"
 if [ "${SLIME_BROWSER_ENV_MODE}" = "sandbox" ]; then
   : "${SANDBOX_ORCHESTRATOR_URL:?sandbox mode requires SANDBOX_ORCHESTRATOR_URL}"
@@ -90,11 +53,8 @@ if [ "${SLIME_BROWSER_ENV_MODE}" = "sandbox" ]; then
   echo "sandbox mode: orchestrator=${SANDBOX_ORCHESTRATOR_URL} image=${BROWSER_SANDBOX_IMAGE}"
 fi
 if [ "${SLIME_BROWSER_ENV_MODE}" = "browser-use" ]; then
-  # Browser-Use cloud: the paper's browser backend. Sessions come up in ~1 s, so
-  # none of the local_process startup workarounds below apply. The rollout gate
-  # (SLIME_BROWSER_ROLLOUT_CONCURRENCY) is the only concurrency limit -- an
-  # iteration is 48 prompts x 5 samples = 240 episodes and would otherwise open
-  # all 240 vendor sessions at once.
+  # An iteration is 48 prompts x 5 samples = 240 episodes; without this gate all
+  # 240 vendor sessions open at once.
   set +x
   : "${BROWSER_USE_API_KEY:?browser-use mode requires BROWSER_USE_API_KEY}"
   set -x
@@ -103,19 +63,10 @@ if [ "${SLIME_BROWSER_ENV_MODE}" = "browser-use" ]; then
 fi
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/root/.cache/ms-playwright}"
 export SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES="${SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES:-90}"
-# env_server logs go to NODE-LOCAL disk, not Weka. One fresh env_server (and
-# Chromium) is spawned per task, each streaming stdout/stderr to its own file, so
-# at concurrency 48 that is 48 concurrent writers plus a file create per task.
-# Weka is a shared network FS sitting at 99% full here, and env_server startup
-# latency climbed 60s -> 476s over ~300 task launches against a 600s task
-# timeout. Local disk removes that from the startup path. Set
-# SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR explicitly to override (e.g. back to Weka
-# when you need the logs to survive the job).
-# env/config.yaml sets startup_timeout_secs=30, but measured env_server startup
-# is 50-500s once training rollouts contend with Megatron + 8 sglang engines for
-# CPU. A 30s budget therefore rejects environments that are merely slow, which is
-# what the "env_server at http..." failures are. Raising the budget discards no
-# work and changes no training math -- it only stops throwing away usable envs.
+# One env_server per task, each streaming to its own log file. On Weka that
+# pushed startup latency 60s -> 476s; node-local disk removes it from the
+# startup path. Measured startup is 50-500s under CPU contention, so the
+# config's 30s budget rejects environments that are merely slow.
 export SLIME_BROWSER_LOCAL_PROCESS_STARTUP_TIMEOUT_SECS="${SLIME_BROWSER_LOCAL_PROCESS_STARTUP_TIMEOUT_SECS:-300}"
 export SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR="${SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR:-/tmp/env_server_logs}"
 mkdir -p "${SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR}"
@@ -132,36 +83,20 @@ set -x
 # (0.5.3) vs flashinfer-jit-cache (0.6.3). ----
 export FLASHINFER_DISABLE_VERSION_CHECK=1
 
-# ---- Memory. On H100 (80 GiB) this run OOM'd in the Megatron backward pass and
-# needed mem-fraction-static lowered to 0.5. On B300 (268 GiB usable, confirmed by
-# beaker/probe_blackwell.sh) there is 3.3x the headroom, so we leave the launcher's
-# own 0.6 alone -- one fewer deviation. Override SGLANG_MEM_FRACTION_STATIC to go
-# back to 0.5 if this is ever run on Hopper again.
+# ---- Memory. The launcher's 0.6 fits Blackwell; drop to 0.5 on H100, which
+# OOM'd in the Megatron backward pass.
 #
-# Do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True here. The torch OOM
-# message suggests it, but it is incompatible with TorchMemorySaver -- the very
-# mechanism --colocate uses to release sglang memory during training. It makes
-# every SGLangEngine.init() fail with:
-#   "TorchMemorySaver is disabled for the current process because
-#    expandable_segments is not supported yet."
-# (Confirmed the hard way: it killed run v2 at engine init.)
+# Do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True, however much the
+# torch OOM message suggests it -- TorchMemorySaver (what --colocate uses to
+# release sglang memory) refuses to initialise when it is on.
 export SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.6}"
 
-# ---- Optional: activation recompute (RL_RECOMPUTE=1) --------------------------
-# Lets the run fit on H100 (80 GiB), where three earlier attempts OOM'd in the
-# Megatron backward pass -- the last one needed only 70 MiB more. Recompute is
-# mathematically identical: same gradients, same update, activations are just
-# recomputed in the backward instead of stored. It costs step time (~30-40%),
-# nothing else, so an H100 arm here is a scheduling fallback, not a deviation in
-# results. The launcher ships these three flags commented out at :471-473.
+# ---- Optional activation recompute, for fitting on H100. Same gradients, same
+# update, ~30-40% slower steps. Uncomments three launcher flags at :471-473.
 RL_RECOMPUTE="${RL_RECOMPUTE:-0}"
 
-# ---- Eval cadence (pure observation, no effect on the trained model) ---------
-# The launcher evals every 5 iterations on the full WebVoyager val set. Measured
-# on jupiter: one eval pass = ~80 min (428 tasks judged in 61 min, ~7/min), so at
-# interval 5 over 90 iterations that is ~18 passes = ~24 h of pure eval on top of
-# training. The paper does not specify an eval interval, and eval never touches
-# the weights, so raising this costs only monitoring resolution.
+# ---- Eval cadence. One pass is ~80 min, so the launcher's interval of 5 adds
+# ~24 h over 90 iterations. Raising it costs only monitoring resolution.
 EVAL_INTERVAL="${EVAL_INTERVAL:-5}"
 
 # ---- W&B ----
@@ -172,8 +107,7 @@ WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-molmoweb}"
 echo "Probing outbound web access..."
 curl -sS --connect-timeout 10 --max-time 20 -o /dev/null -w "example.com -> %{http_code}\n" https://example.com \
   || { echo "ERROR: no outbound web access; rollouts cannot browse. Aborting."; exit 3; }
-# xtrace off around the judge probe: with set -x the Bearer token lands in the
-# Beaker logs in plaintext, readable by anyone with workspace access.
+# xtrace off: set -x would put the Bearer token in the Beaker logs.
 set +x
 curl -sS --connect-timeout 10 --max-time 20 -o /dev/null -w "openai -> %{http_code}\n" \
   -H "Authorization: Bearer ${OPENAI_API_KEY}" https://api.openai.com/v1/models \
@@ -183,77 +117,34 @@ set -x
 # ---- Chromium for Playwright ----
 python -m playwright install chromium || playwright install chromium
 
-# ---- Token-capped micro-batching (RL_MAX_TOKENS_PER_GPU) ---------------------
-# Needed on H100 80 GiB. Iteration 0 completed its rollout and then OOM'd in
-# slime/backends/megatron_utils/loss.py:80 at `logits.div(rollout_temperature)`,
-# trying to allocate 2.10 GiB with 2.73 GiB free while the colocated sglang engine
-# held 6.28 GiB. That is the LOGITS tensor (tokens x vocab 151936), not
-# activations -- which is why --recompute alone was not enough; it bounds
-# activation memory only. Capping tokens per micro-batch bounds the logits
-# allocation directly. The launcher ships both flags commented out at :481-483.
-#
-# It is also the throughput knob, which is the reason it is now on by default.
-# With the launcher's static --micro-batch-size 1, iteration 0 measured 34
-# TFLOPS/GPU (~2% of a B300), 80 effective tokens/GPU/s, and train_wait_time 2261 s
-# against a 1909 s train phase: every rank idles until the longest single sample in
-# its step finishes. Dynamic batching packs samples up to a token budget instead of
-# one per step, which both fills the GPU and evens out the per-rank tail.
-#
-# 32768 with TP=4 on 288 GiB B300s. Lower it if the train phase OOMs; the logits
-# tensor is tokens x 151936, so memory scales linearly with this number.
+# ---- Token-capped micro-batching. Bounds the logits tensor (tokens x vocab
+# 151936), which --recompute does not -- that is what OOM'd on H100. It is also
+# the throughput knob: the launcher's static --micro-batch-size 1 measured 34
+# TFLOPS/GPU because every rank idles until its longest single sample finishes.
+# Memory scales linearly with this number; lower it if the train phase OOMs.
 RL_MAX_TOKENS_PER_GPU="${RL_MAX_TOKENS_PER_GPU:-32768}"
 
-# ---- Triton must use the CUDA 12.9 ptxas, not its bundled 12.8 one -----------
-# Triton ships its own ptxas at triton/backends/nvidia/bin/ptxas. In this image
-# that is release 12.8, which does not accept --gpu-name sm_103, so every Triton
-# JIT compile on B300 dies with "PTXAS error: Internal Triton PTX codegen error".
-# The system ptxas is 12.9 and does support sm_103 (verified with
-# `ptxas --gpu-name sm_103`). sglang uses Triton kernels on many paths, so this is
-# needed regardless of the attention backend.
+# ---- Triton's bundled ptxas is 12.8 and rejects --gpu-name sm_103, so every
+# JIT compile fails on B300. The system 12.9 ptxas accepts it. ----
 if [ -x /usr/local/cuda/bin/ptxas ]; then
   export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
   echo "TRITON_PTXAS_PATH=${TRITON_PTXAS_PATH} ($(/usr/local/cuda/bin/ptxas --version 2>/dev/null | tail -1))"
 fi
 
-# ---- sglang CUDA graphs (SGLANG_DISABLE_CUDA_GRAPH) --------------------------
-# On B300 the run freezes DURING cuda-graph capture: engines sit at different
-# batch sizes (bs=1 at 100%, bs=12 at 50%) and the log goes silent for hours,
-# never reaching the health_monitor / "Rollout offload succeeded" lines that
-# follow capture on H100. With flashinfer's AOT cache removed, every new capture
-# shape triggers a JIT compile, which makes capture the expensive step.
-#
-# Setting this to 1 skips capture entirely: slower decoding, but it isolates
-# whether capture is the blocker. SGLANG_CUDA_GRAPH_MAX_BS is the middle ground --
-# keep graphs but cap the shapes that must be captured.
+# ---- sglang CUDA graphs. B300 freezes during capture (every new shape JITs
+# once flashinfer's AOT cache is gone). 1 skips capture; SGLANG_CUDA_GRAPH_MAX_BS
+# is the middle ground, keeping graphs but capping the captured shapes. ----
 SGLANG_DISABLE_CUDA_GRAPH="${SGLANG_DISABLE_CUDA_GRAPH:-0}"
 SGLANG_CUDA_GRAPH_MAX_BS="${SGLANG_CUDA_GRAPH_MAX_BS:-}"
 
-# ---- sglang attention backend (SGLANG_ATTENTION_BACKEND) ---------------------
-# sglang leaves attention_backend=None and auto-selects. On Blackwell it picks the
-# TRTLLM paged-attention decode path, which calls sgl_kernel's
-# trtllm_paged_attention_decode. In this image sglang is 0.5.6.post2 (OpenWebRL's
-# requirements downgrade it from the base's 0.5.9) while the sm_103 sgl-kernel is
-# built from the v0.5.9 source tree, so that op's signature does not match and
-# SGLangEngine.init() dies with "Mismatched number of arguments". H100 never hit
-# this because the TRTLLM decode path is Blackwell-only.
-#
-# Forcing a backend that does not use that op avoids it. Empty = sglang's default.
+# ---- sglang attention backend. Auto-select picks the Blackwell-only TRTLLM
+# decode path, whose sgl_kernel signature does not match the downgraded sglang
+# 0.5.6.post2 in this image. Force a backend that avoids that op; empty = auto.
 SGLANG_ATTENTION_BACKEND="${SGLANG_ATTENTION_BACKEND:-}"
 
-# ---- Rollout task timeout ----------------------------------------------------
-# Paper Table 7 sets "Rollout task timeout 600 s", but that assumes a Kubernetes
-# sandbox whose browser is ready in ~1 s. In local_process the env_server is cold
-# started per task and, once training rollouts contend for CPU, startup measured
-# 420 s mean / 599 s max -- so a 600 s task budget leaves an episode ~100 s for 15
-# steps and it is killed mid-way. Measured across three runs at concurrency 90 and
-# 48, with logs on Weka and on local disk: same result every time.
-#
-# Raising the task timeout keeps the paper's EFFECTIVE episode budget (600 s of
-# actual browsing) rather than spending most of it on a startup tax the paper does
-# not have. It changes no optimization hyperparameter. Set ROLLOUT_TASK_TIMEOUT to
-# 600 to go back to the literal paper value.
-# In browser-use (and sandbox) mode the browser is warm, so the paper's literal
-# 600 s is the right budget; only local_process needs the inflated one.
+# ---- Rollout task timeout. Table 7 says 600 s, which assumes a warm sandbox
+# browser. local_process cold starts one per task (420 s mean under contention),
+# leaving an episode ~100 s, so only that mode gets the inflated budget.
 if [ "${SLIME_BROWSER_ENV_MODE}" = "local_process" ]; then
   ROLLOUT_TASK_TIMEOUT="${ROLLOUT_TASK_TIMEOUT:-1800}"
 else
@@ -271,8 +162,8 @@ fi
 echo "=== config diff (rollout_task_timeout only) ==="
 diff "${CFG_SRC}" "${CFG_RUN}" || true
 
-# ---- Patch only the two site-specific lines, in a throwaway copy. Keep it in
-# scripts/ so the launcher's REPO_ROOT=$(dirname)/.. math still resolves. ----
+# ---- Patch the site-specific lines in a throwaway copy. It stays in scripts/
+# so the launcher's REPO_ROOT=$(dirname)/.. math still resolves. ----
 SRC="${OPENWEBRL_ROOT}/scripts/run_browser_Qwen3VL_4B_Instruct.sh"
 RUN="${OPENWEBRL_ROOT}/scripts/run_browser_Qwen3VL_4B_repro.sh"
 cp "${SRC}" "${RUN}"
