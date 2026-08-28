@@ -35,6 +35,29 @@ def sandbox_env_args(args):
     ]
 
 
+def browser_use_env_args(args):
+    """Extra gantry args for Browser-Use mode (the paper's stealth browsers).
+
+    Concurrency is the rollout gate (SLIME_BROWSER_ROLLOUT_CONCURRENCY), not the
+    local_process pool: with browser-use there is no local Chromium to cap, and an
+    ungated iteration would open all 240 episodes (48 prompts x 5 samples) against
+    the vendor at once.
+    """
+    if args.env_mode != "browser-use":
+        return []
+    return [
+        "--env", "SLIME_BROWSER_ENV_MODE=browser-use",
+        "--secret-env", "BROWSER_USE_API_KEY=" + args.browser_use_key_secret,
+    ]
+
+
+def env_mode_args(args):
+    """Gantry args for whichever browser env mode is selected."""
+    if args.env_mode == "browser-use":
+        return browser_use_env_args(args)
+    return sandbox_env_args(args)
+
+
 def snapshot_script(script_rel, name):
     """Copy the entry script to an immutable per-run path and return it.
 
@@ -68,12 +91,15 @@ def main():
     p.add_argument("--priority", default="urgent")
     p.add_argument("--resume-from", default="",
                    help="Existing SLIME_SAVE_DIR to resume from after preemption.")
-    p.add_argument("--env-mode", default="local_process", choices=("local_process", "sandbox"),
+    p.add_argument("--env-mode", default="local_process",
+                   choices=("local_process", "sandbox", "browser-use"),
                    help="Browser env mode. 'sandbox' uses Orchard pods (the paper's setting).")
     p.add_argument("--sandbox-url", default=os.environ.get("SANDBOX_ORCHESTRATOR_URL", ""),
                    help="Orchard orchestrator base URL (sandbox mode).")
     p.add_argument("--sandbox-image", default=os.environ.get("BROWSER_SANDBOX_IMAGE", ""),
                    help="browser-env image in a registry the Orchard cluster can pull.")
+    p.add_argument("--browser-use-key-secret", default="MOLMOWEB_BROWSERUSE",
+                   help="Beaker secret holding the Browser-Use cloud API key.")
     p.add_argument("--sandbox-key-secret", default="PS_SANDBOX_API_KEY",
                    help="Beaker secret holding the Orchard API key.")
     p.add_argument("--browser-concurrency", type=int, default=0,
@@ -142,10 +168,12 @@ def main():
         *(["--env", "SGLANG_CUDA_GRAPH_MAX_BS=" + str(args.cuda_graph_max_bs)]
           if args.cuda_graph_max_bs else []),
         *(["--env", "EVAL_INTERVAL=" + str(args.eval_interval)] if args.eval_interval else []),
-        *(["--env", "SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES=" + str(args.browser_concurrency)]
+        *(["--env", ("SLIME_BROWSER_ROLLOUT_CONCURRENCY="
+                     if args.env_mode == "browser-use"
+                     else "SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES=") + str(args.browser_concurrency)]
           if args.browser_concurrency else []),
         *(["--env", "SGLANG_MEM_FRACTION_STATIC=" + args.mem_fraction] if args.mem_fraction else []),
-        *sandbox_env_args(args),
+        *env_mode_args(args),
     ]
     if args.resume_from:
         command += ["--env", "SLIME_LOAD_CHECKPOINT=" + args.resume_from]

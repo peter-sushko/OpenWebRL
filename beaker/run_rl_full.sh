@@ -89,6 +89,18 @@ if [ "${SLIME_BROWSER_ENV_MODE}" = "sandbox" ]; then
     || { echo "ERROR: Orchard client missing at sandbox/client/sandbox_client.py"; exit 5; }
   echo "sandbox mode: orchestrator=${SANDBOX_ORCHESTRATOR_URL} image=${BROWSER_SANDBOX_IMAGE}"
 fi
+if [ "${SLIME_BROWSER_ENV_MODE}" = "browser-use" ]; then
+  # Browser-Use cloud: the paper's browser backend. Sessions come up in ~1 s, so
+  # none of the local_process startup workarounds below apply. The rollout gate
+  # (SLIME_BROWSER_ROLLOUT_CONCURRENCY) is the only concurrency limit -- an
+  # iteration is 48 prompts x 5 samples = 240 episodes and would otherwise open
+  # all 240 vendor sessions at once.
+  set +x
+  : "${BROWSER_USE_API_KEY:?browser-use mode requires BROWSER_USE_API_KEY}"
+  set -x
+  export SLIME_BROWSER_ROLLOUT_CONCURRENCY="${SLIME_BROWSER_ROLLOUT_CONCURRENCY:-25}"
+  echo "browser-use mode: rollout concurrency=${SLIME_BROWSER_ROLLOUT_CONCURRENCY}"
+fi
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/root/.cache/ms-playwright}"
 export SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES="${SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES:-90}"
 # env_server logs go to NODE-LOCAL disk, not Weka. One fresh env_server (and
@@ -159,7 +171,7 @@ WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-molmoweb}"
 # ---- Fail fast rather than burn days on a run that cannot browse or judge ----
 echo "Probing outbound web access..."
 curl -sS --connect-timeout 10 --max-time 20 -o /dev/null -w "example.com -> %{http_code}\n" https://example.com \
-  || { echo "ERROR: no outbound web access; local_process rollouts cannot browse. Aborting."; exit 3; }
+  || { echo "ERROR: no outbound web access; rollouts cannot browse. Aborting."; exit 3; }
 # xtrace off around the judge probe: with set -x the Bearer token lands in the
 # Beaker logs in plaintext, readable by anyone with workspace access.
 set +x
@@ -233,11 +245,22 @@ SGLANG_ATTENTION_BACKEND="${SGLANG_ATTENTION_BACKEND:-}"
 # actual browsing) rather than spending most of it on a startup tax the paper does
 # not have. It changes no optimization hyperparameter. Set ROLLOUT_TASK_TIMEOUT to
 # 600 to go back to the literal paper value.
-ROLLOUT_TASK_TIMEOUT="${ROLLOUT_TASK_TIMEOUT:-1800}"
+# In browser-use (and sandbox) mode the browser is warm, so the paper's literal
+# 600 s is the right budget; only local_process needs the inflated one.
+if [ "${SLIME_BROWSER_ENV_MODE}" = "local_process" ]; then
+  ROLLOUT_TASK_TIMEOUT="${ROLLOUT_TASK_TIMEOUT:-1800}"
+else
+  ROLLOUT_TASK_TIMEOUT="${ROLLOUT_TASK_TIMEOUT:-600}"
+fi
 CFG_SRC="${OPENWEBRL_ROOT}/openwebrl/browser_training_config.yaml"
 CFG_RUN="${OPENWEBRL_ROOT}/openwebrl/browser_training_config_repro.yaml"
 cp "${CFG_SRC}" "${CFG_RUN}"
 sed -i -e "s|^rollout_task_timeout_secs:.*|rollout_task_timeout_secs: ${ROLLOUT_TASK_TIMEOUT}.0|" "${CFG_RUN}"
+if [ -n "${SLIME_BROWSER_ROLLOUT_CONCURRENCY:-}" ]; then
+  # The config value wins over the env var (generate_browser.py:224), so it has to
+  # be patched too, not just exported.
+  sed -i -e "s|^browser_rollout_concurrency:.*|browser_rollout_concurrency: ${SLIME_BROWSER_ROLLOUT_CONCURRENCY}|" "${CFG_RUN}"
+fi
 echo "=== config diff (rollout_task_timeout only) ==="
 diff "${CFG_SRC}" "${CFG_RUN}" || true
 
