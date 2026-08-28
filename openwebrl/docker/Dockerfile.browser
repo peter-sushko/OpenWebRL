@@ -58,6 +58,9 @@ RUN touch /app/openwebrl/__init__.py \
 # Core env files
 COPY openwebrl/env/base_env.py       /app/openwebrl/env/base_env.py
 COPY openwebrl/env/web_env.py        /app/openwebrl/env/web_env.py
+# web_env.py imports openwebrl.feedback_utils; without it the server dies at
+# import time with ModuleNotFoundError.
+COPY openwebrl/feedback_utils.py     /app/openwebrl/feedback_utils.py
 COPY openwebrl/env/utils/js.py       /app/openwebrl/env/utils/js.py
 COPY openwebrl/env/utils/keyboard.py /app/openwebrl/env/utils/keyboard.py
 

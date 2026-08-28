@@ -193,7 +193,7 @@ local/
 /core
 /eval/
 /openwebrl/.git/
-/openwebrl/eval/
+# /openwebrl/eval/
 /openwebrl/env/.env
 /openwebrl/env/.auth/
 /openwebrl/__pycache__/
@@ -222,3 +222,7 @@ _examples_synced/
 todolist.md
 .env
 .DS_Store
+
+# Generated at launch by beaker/run_rl_full.sh
+openwebrl/browser_training_config_repro.yaml
+scripts/run_browser_Qwen3VL_4B_repro.sh
