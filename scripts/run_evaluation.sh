@@ -68,6 +68,9 @@ JUDGE_PROMPT_VARIANT="${JUDGE_PROMPT_VARIANT:-action_history}" # default
 CONTEXT_NUM_SCREENSHOTS="${CONTEXT_NUM_SCREENSHOTS:-1}" #####################################################
 JUDGE_MAX_ATTACHED_IMGS="${JUDGE_MAX_ATTACHED_IMGS:-3}"
 BROWSER_MAX_STEPS="${BROWSER_MAX_STEPS:-30}"
+# Paper Table 8: judge timeout 120 s. run_evaluate.py's argparse default is 30 s
+# and this script never passed the flag, so every run so far used 30.
+JUDGE_TIMEOUT_SECS="${JUDGE_TIMEOUT_SECS:-120}"
 
 export JUDGE_API_BASE
 export JUDGE_API_HOST
@@ -91,6 +94,7 @@ echo "TURN_HISTORY_REASONING_MODE=${TURN_HISTORY_REASONING_MODE}"
 echo "BROWSER_RESPONSE_FORMAT_MODE=${BROWSER_RESPONSE_FORMAT_MODE}"
 echo "BROWSER_INCLUDE_TOOL_RESPONSE=${BROWSER_INCLUDE_TOOL_RESPONSE}"
 echo "BROWSER_MAX_STEPS=${BROWSER_MAX_STEPS}"
+echo "JUDGE_TIMEOUT_SECS=${JUDGE_TIMEOUT_SECS}"
 echo "MODEL_LIST_OVERRIDE=${MODEL_LIST_OVERRIDE}"
 echo "MODEL_LIST_DIR=${MODEL_LIST_DIR}"
 echo "SGLANG_AUTO_SERVE=${SGLANG_AUTO_SERVE}"
@@ -210,6 +214,13 @@ run_eval_for_model() {
         judge_model_arg=(--judge-model "${JUDGE_MODEL}")
     fi
 
+    # Optional subset run: TASK_INDICES="3,17,42" evaluates only those rows of
+    # the task file. Empty (the default) evaluates the whole benchmark.
+    local task_indices_arg=()
+    if [ -n "${TASK_INDICES:-}" ]; then
+        task_indices_arg=(--task-indices "${TASK_INDICES}")
+    fi
+
     python openwebrl/run_evaluate.py --task-file  ${task_file} \
             --eval-protocol "${EVAL_PROTOCOL}" \
             --hf-checkpoint "${current_model_name}" \
@@ -220,11 +231,13 @@ run_eval_for_model() {
             --judge-max-attached-imgs "${JUDGE_MAX_ATTACHED_IMGS}" \
             "${judge_model_arg[@]}" \
             --judge-api-mode "${JUDGE_API_MODE}" \
+            --judge-timeout-secs "${JUDGE_TIMEOUT_SECS}" \
             --judge-prompt-variant "${JUDGE_PROMPT_VARIANT}" \
             --turn-history-reasoning-mode "${TURN_HISTORY_REASONING_MODE}" \
             --browser-response-format-mode "${BROWSER_RESPONSE_FORMAT_MODE}" \
             --browser-include-tool-response "${BROWSER_INCLUDE_TOOL_RESPONSE}" \
             --max-steps "${BROWSER_MAX_STEPS}" \
+            "${task_indices_arg[@]}" \
             --turn-level
     stop_sglang_server
 }

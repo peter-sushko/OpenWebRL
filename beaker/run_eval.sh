@@ -36,14 +36,25 @@ export HF_HOME="${HF_HOME:-/weka/oe-training-default/new_peters/cache/hf}"
 
 # ---- Checkpoint under evaluation. Either a local path or a HuggingFace repo
 # id (sglang and run_evaluate.py both accept a repo id; HF_HOME caches to Weka). ----
+# CKPT may be a single path/repo-id, or a whitespace-separated LIST. A list is
+# evaluated sequentially by run_evaluation.sh (one sglang server at a time,
+# results split per model_tag), which is the only safe way to sweep checkpoints
+# when the cloud-browser concurrency cap is account-wide rather than per-job.
 CKPT="${CKPT:-/weka/oe-training-default/new_peters/models/OpenWebRL/OpenWebRL-4B-SFT}"
-if [ ! -d "${CKPT}" ] && [[ "${CKPT}" != */* ]]; then
-  echo "ERROR: checkpoint is neither a local dir nor a HF repo id: ${CKPT}"; exit 2
-fi
+for _c in ${CKPT}; do
+  if [ ! -d "${_c}" ] && [[ "${_c}" != */* ]]; then
+    echo "ERROR: checkpoint is neither a local dir nor a HF repo id: ${_c}"; exit 2
+  fi
+done
 export MODEL_LIST_OVERRIDE="${CKPT}"
 export MODEL_LIST_DIR=""
-# Slug used to keep each checkpoint's results in their own tree.
-CKPT_SLUG="$(basename "${CKPT}")"
+# Slug used to keep each checkpoint's results in their own tree. For a list the
+# per-model subdirectory does that job, so the tree is named by RUN_TAG instead.
+if [ "$(echo ${CKPT} | wc -w)" -gt 1 ]; then
+  CKPT_SLUG="multi"
+else
+  CKPT_SLUG="$(basename "${CKPT}")"
+fi
 
 # ---- Benchmark selection. JUDGE_MAX_ATTACHED_IMGS is pinned per benchmark
 # because scripts/run_evaluation.sh defaults it to 3 and ALWAYS passes

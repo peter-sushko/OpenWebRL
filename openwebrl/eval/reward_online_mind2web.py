@@ -152,13 +152,28 @@ async def _judge(args: Any, sample: Sample, tool_parser: ToolParser) -> tuple[fl
     if not full_image_list:
         return 0.0, "No screenshots in trajectory.", False
 
-    last_b64 = full_image_list[-1]
-    image_url = last_b64 if last_b64.startswith("data:") else f"data:image/png;base64,{last_b64}"
+    # OSU's agenttrek_eval.py attaches exactly ONE image (the final screenshot)
+    # and its prompt says so, which is why the default here is 1. Paper Table 8
+    # instead lists "Judge screenshots per trajectory 3", so the count is made
+    # configurable to test that; >1 also rewrites the trailing prompt sentence,
+    # otherwise the prompt would claim a single image while several are sent.
+    n_imgs = getattr(args, "judge_max_attached_imgs", None) or 1
+    n_imgs = max(1, int(n_imgs))
+    chosen = full_image_list[-n_imgs:]
+
+    def _as_url(b64: str) -> str:
+        return b64 if b64.startswith("data:") else f"data:image/png;base64,{b64}"
 
     user_text = USER_PROMPT.format(
         task=task,
         thoughts_and_actions=_format_trajectory(thoughts, actions),
     )
+    if len(chosen) > 1:
+        user_text = user_text.replace(
+            "The last snapshot of the web page is shown in the image.",
+            f"The last {len(chosen)} snapshots of the web page are shown in the images, "
+            "in chronological order; the final image is the last state of the page.",
+        )
     if getattr(args, "log_judge_output", False):
         logger.info("Judge user prompt: %s", user_text)
 
@@ -166,7 +181,10 @@ async def _judge(args: Any, sample: Sample, tool_parser: ToolParser) -> tuple[fl
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": [
             {"type": "text", "text": user_text},
-            {"type": "image_url", "image_url": {"url": image_url, "detail": "high"}},
+            *[
+                {"type": "image_url", "image_url": {"url": _as_url(b), "detail": "high"}}
+                for b in chosen
+            ],
         ]},
     ]
 
