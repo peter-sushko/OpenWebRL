@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BrowserEnvConfig(EnvConfig):
     """Configuration specific to browser environment."""
-    # Environment mode: "sandbox", "local_process", or "browser-use"
+    # Environment mode: "sandbox", "local_process", "browser-use", or "browserbase"
     mode: str = "sandbox"
     # Sandbox-specific config (used when mode: sandbox)
     sandbox: dict | None = None
@@ -35,6 +35,8 @@ class BrowserEnvConfig(EnvConfig):
     local_process: dict | None = None
     # Browser-Use-specific config (used when mode: browser-use)
     browser_use: dict | None = None
+    # Browserbase-specific config (used when mode: browserbase)
+    browserbase: dict | None = None
 
     # Web browser environment configuration
     width: int = 1280

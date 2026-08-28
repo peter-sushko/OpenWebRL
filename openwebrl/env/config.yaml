@@ -1,7 +1,8 @@
-# Environment mode: "local_process", "sandbox", or "browser-use"
+# Environment mode: "local_process", "sandbox", "browser-use", or "browserbase"
 # - local_process: create one local env_server subprocess/process group per env
 # - sandbox: create K8s sandbox pods via orchestrator + exec/curl
 # - browser-use: drive a remote browser hosted on cloud.browser-use.com via CDP
+# - browserbase: drive a remote stealth browser hosted on browserbase.com via CDP
 mode: sandbox
 
 # Sandbox-specific config (used when mode: sandbox).
@@ -28,6 +29,23 @@ browser_use:
   timeout: 10                   # session timeout in minutes (free: <=15, paid: <=240)
   profile_id: null              # optional Browser-Use profile id
   proxy_country_code: null      # optional proxy country code (e.g. "us", "de"); null disables the proxy
+
+# Browserbase-specific config (used when mode: browserbase).
+# A fresh remote session is created per generation and released on env.exit().
+# Credentials come from BROWSERBASE_API_KEY / BROWSERBASE_PROJECT_ID.
+browserbase:
+  api_key: ""                   # BROWSERBASE_API_KEY
+  project_id: ""                # BROWSERBASE_PROJECT_ID
+  # Advanced stealth pins the viewport to 1280x720 and ignores the width/height
+  # below; turning it off honours them but gives up the anti-bot fingerprinting.
+  advanced_stealth: true        # BROWSERBASE_ADVANCED_STEALTH; Scale-plan feature
+  solve_captchas: true          # BROWSERBASE_SOLVE_CAPTCHAS
+  # Residential proxies are what change the egress IP -- advanced stealth alone
+  # does not. This is the setting that beats IP-reputation 403s, and it bills
+  # per GB of egress. BROWSERBASE_PROXIES=false turns it off.
+  proxies: true
+  timeout_secs: 1800            # BROWSERBASE_SESSION_TIMEOUT_S; session lifetime cap
+  region: null                  # BROWSERBASE_REGION, e.g. "us-west-2"
 
 # Local subprocess-specific config (used when mode: local_process).
 # A fresh local env_server subprocess is created for each generation and
