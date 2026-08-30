@@ -30,7 +30,12 @@ mkdir -p "${SLIME_SAVE_DIR}"
 RL_STAGE="${RL_STAGE:-1}"
 case "${RL_STAGE}" in
   1) NUM_ROLLOUT="${NUM_ROLLOUT:-90}"; BROWSER_MAX_STEPS="${BROWSER_MAX_STEPS:-15}"; RL_LR="${RL_LR:-1e-6}" ;;
-  2) NUM_ROLLOUT="${NUM_ROLLOUT:-50}"; BROWSER_MAX_STEPS="${BROWSER_MAX_STEPS:-30}"; RL_LR="${RL_LR:-5e-7}" ;;
+  # 140, not 50: slime's --num-rollout is the absolute stop index, and a resumed
+  # run starts at loaded_rollout_id + 1 (actor.py:400). Stage 1 ends at 89, so
+  # stage 2 runs ids 90..139 -- the paper's 50 further iterations. Passing 50 here
+  # makes range(90, 50) empty and the job "succeeds" in 7 minutes having trained
+  # nothing.
+  2) NUM_ROLLOUT="${NUM_ROLLOUT:-140}"; BROWSER_MAX_STEPS="${BROWSER_MAX_STEPS:-30}"; RL_LR="${RL_LR:-5e-7}" ;;
   *) echo "ERROR: RL_STAGE must be 1 or 2 (got '${RL_STAGE}')"; exit 6 ;;
 esac
 export BROWSER_MAX_STEPS
