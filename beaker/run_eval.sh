@@ -130,6 +130,14 @@ export SLIME_BROWSER_LOCAL_PROCESS_MAX_PROCESSES="${SLIME_BROWSER_LOCAL_PROCESS_
 export SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR="${OUTPUT_ROOT}/env_server_logs"
 mkdir -p "${SLIME_BROWSER_LOCAL_PROCESS_LOG_DIR}"
 
+# ---- Triton's bundled ptxas is 12.8 and rejects --gpu-name sm_103, so every JIT
+# compile fails on B300 with "PTXAS error: Internal Triton PTX codegen error".
+# The system 12.9 ptxas accepts it. Same fix as beaker/run_rl_full.sh:128. ----
+if [ -x /usr/local/cuda/bin/ptxas ]; then
+  export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
+  echo "TRITON_PTXAS_PATH=${TRITON_PTXAS_PATH}"
+fi
+
 # ---- Base image ships mismatched flashinfer (0.5.3) vs jit-cache (0.6.3). ----
 export FLASHINFER_DISABLE_VERSION_CHECK=1
 
