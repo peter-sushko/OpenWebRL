@@ -174,6 +174,20 @@ sed -i -e "s|^set -ex$|set -e|" \
        -e "s|--lr 5e-7|--lr ${RL_LR}|" \
        -e "s|--eval-interval 5|--eval-interval ${EVAL_INTERVAL}|" \
        -e "s|--custom-config-path openwebrl/browser_training_config.yaml|--custom-config-path openwebrl/browser_training_config_repro.yaml|" "${RUN}"
+# ---- Stage 2 changes the LR mid-run (paper Table 7: 1e-6 then 5e-7) ----------
+# Megatron's OptimizerParamScheduler asserts that the scheduler values in the
+# checkpoint match the ones on the command line, so resuming stage 1 (1e-6) with
+# --lr 5e-7 dies at MegatronTrainRayActor.init():
+#   AssertionError: OptimizerParamScheduler: class input value 5e-07 and
+#   checkpoint value 1e-06 for learning rate do not match
+# --override-opt_param-scheduler tells it to use the command-line schedule and
+# ignore the checkpoint's, which is exactly the intended stage-2 behaviour. The
+# optimizer state itself (Adam moments) is still loaded.
+if [ -n "${SLIME_LOAD_CHECKPOINT}" ]; then
+  sed -i -e "s|   --lr-decay-style constant|   --lr-decay-style constant\n   --override-opt_param-scheduler|" "${RUN}"
+  grep -n "override-opt_param-scheduler" "${RUN}" || { echo "ERROR: failed to add --override-opt_param-scheduler"; exit 7; }
+fi
+
 if [ -n "${RL_MAX_TOKENS_PER_GPU}" ]; then
   sed -i -e "s|# --use-dynamic-batch-size|--use-dynamic-batch-size|" \
          -e "s|# --max-tokens-per-gpu 8192|--max-tokens-per-gpu ${RL_MAX_TOKENS_PER_GPU}|" "${RUN}"
