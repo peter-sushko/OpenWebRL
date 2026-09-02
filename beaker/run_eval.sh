@@ -110,7 +110,12 @@ if [ "${SLIME_BROWSER_ENV_MODE}" = "browserbase" ]; then
   python -c "import browserbase" 2>/dev/null \
     || pip install --no-cache-dir "browserbase==1.4.0" \
     || { echo "ERROR: could not install the browserbase SDK"; exit 6; }
-  echo "browserbase mode: proxies=${BROWSERBASE_PROXIES} stealth=${BROWSERBASE_ADVANCED_STEALTH}"
+  # Advanced stealth serves 1280x720 whatever we ask for, so configure that and
+  # keep the request honest; the repo default is 1280x1000 for the other envs.
+  if [ "${BROWSERBASE_ADVANCED_STEALTH}" = "true" ]; then
+    export SLIME_BROWSER_VIEWPORT="${SLIME_BROWSER_VIEWPORT:-1280x720}"
+  fi
+  echo "browserbase mode: proxies=${BROWSERBASE_PROXIES} stealth=${BROWSERBASE_ADVANCED_STEALTH} viewport=${SLIME_BROWSER_VIEWPORT:-<config default>}"
   # Release anything a previous aborted run left live before opening new sessions.
   python -m openwebrl.env.browserbase_env --cleanup || true
 fi

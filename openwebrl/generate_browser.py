@@ -730,6 +730,29 @@ def _apply_browser_env_mode_override(env_config: BrowserEnvConfig) -> BrowserEnv
     return merged_config
 
 
+def _apply_viewport_env_override(env_config: BrowserEnvConfig) -> BrowserEnvConfig:
+    """Let launch scripts set the viewport per env mode via SLIME_BROWSER_VIEWPORT=WxH.
+
+    Browserbase's advanced stealth pins the remote viewport to 1280x720 and ignores
+    the requested browser_settings.viewport, so a run configured at the repo default
+    1280x1000 sets up every coordinate transform against the wrong geometry and only
+    recovers after setup() queries the real dimensions. Configuring 1280x720 directly
+    makes the request match reality.
+    """
+    raw = os.environ.get("SLIME_BROWSER_VIEWPORT", "").strip().lower()
+    if not raw:
+        return env_config
+    try:
+        w, h = (int(v) for v in raw.split("x", 1))
+    except ValueError:
+        raise ValueError(f"SLIME_BROWSER_VIEWPORT must look like 1280x720, got {raw!r}")
+    merged = dict(env_config)
+    merged["width"] = w
+    merged["height"] = h
+    logger.info("Viewport override from SLIME_BROWSER_VIEWPORT: %dx%d", w, h)
+    return merged
+
+
 def _apply_sandbox_env_overrides(env_config: BrowserEnvConfig) -> BrowserEnvConfig:
     """Allow launch scripts to override sandbox settings via environment variables."""
     if env_config.get("mode", "sandbox") != "sandbox":
@@ -992,6 +1015,7 @@ async def _initialize_resources(args: Any, task_id: str, task_metadata: dict[str
     else:
         raise ValueError(f"❗  Env config path {env_config_path} does not exist.")
     env_config = _apply_browser_env_mode_override(env_config)
+    env_config = _apply_viewport_env_override(env_config)
     env_config = _apply_sandbox_env_overrides(env_config)
     env_config = _apply_local_process_env_overrides(env_config)
 
