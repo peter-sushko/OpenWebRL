@@ -145,18 +145,12 @@ class BrowserbaseWebEnv(WebEnv):
             auth_info=self.auth_info,
         )
 
-        # Advanced stealth ignores browser_settings.viewport and serves 1280x720,
-        # but a CDP set_viewport_size() after connecting does take effect, so ask
-        # for the configured geometry (1280x1000) the way browser_use_env does.
-        # Without this, Browserbase runs are scored at a different screen size than
-        # every other env and the vendor comparison confounds the two.
-        try:
-            await self.page.set_viewport_size(
-                {"width": self.css_width, "height": self.css_height}
-            )
-        except Exception as exc:
-            logger.warning("set_viewport_size(%dx%d) failed: %s",
-                           self.css_width, self.css_height, exc)
+        # Do NOT try to force the viewport here. Under advanced stealth a CDP
+        # set_viewport_size() updates window.innerWidth/innerHeight but NOT what
+        # page.screenshot() renders: measured 30/31 screenshots still 1280x720
+        # while innerHeight reported 1000, which silently defeated the realignment
+        # below (it compares against innerHeight) and left clicks mis-scaled.
+        # Stealth must be off for the configured geometry to be honoured.
 
         # Browserbase sizes the viewport at session-create time and stealth mode
         # may adjust it. WebEnv.execute_single_action scales model coordinates by
@@ -182,6 +176,25 @@ class BrowserbaseWebEnv(WebEnv):
                 self.css_height = int(dims["h"])
         except Exception as exc:
             logger.warning("Could not query remote viewport; keeping configured dims: %s", exc)
+
+        # The screenshot is what the model actually sees, so it -- not
+        # window.innerHeight -- is authoritative for coordinate scaling.
+        try:
+            shot = await self.page.screenshot(timeout=self.screenshot_timeout)
+            from io import BytesIO
+            from PIL import Image
+            shot_w, shot_h = Image.open(BytesIO(shot)).size
+            if (shot_w, shot_h) != (self.screen_size[0], self.screen_size[1]):
+                logger.warning(
+                    "Screenshot is %dx%d but viewport reports %dx%d; scaling clicks "
+                    "to the screenshot.", shot_w, shot_h,
+                    self.screen_size[0], self.screen_size[1],
+                )
+                self.screen_size = (shot_w, shot_h)
+                self.css_width = shot_w // max(1, self.dpr)
+                self.css_height = shot_h // max(1, self.dpr)
+        except Exception as exc:
+            logger.warning("Could not measure screenshot dimensions: %s", exc)
 
         logger.info(
             f"BrowserbaseWebEnv ready (session_id={self.session_id}, "
