@@ -145,6 +145,19 @@ class BrowserbaseWebEnv(WebEnv):
             auth_info=self.auth_info,
         )
 
+        # Advanced stealth ignores browser_settings.viewport and serves 1280x720,
+        # but a CDP set_viewport_size() after connecting does take effect, so ask
+        # for the configured geometry (1280x1000) the way browser_use_env does.
+        # Without this, Browserbase runs are scored at a different screen size than
+        # every other env and the vendor comparison confounds the two.
+        try:
+            await self.page.set_viewport_size(
+                {"width": self.css_width, "height": self.css_height}
+            )
+        except Exception as exc:
+            logger.warning("set_viewport_size(%dx%d) failed: %s",
+                           self.css_width, self.css_height, exc)
+
         # Browserbase sizes the viewport at session-create time and stealth mode
         # may adjust it. WebEnv.execute_single_action scales model coordinates by
         # self.screen_size / self.dpr, so those must describe the REAL viewport or
