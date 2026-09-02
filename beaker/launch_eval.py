@@ -50,6 +50,7 @@ def browserbase_env_args(args):
         "--secret-env", "BROWSERBASE_API_KEY=" + args.browserbase_key_secret,
         "--secret-env", "BROWSERBASE_PROJECT_ID=" + args.browserbase_project_secret,
         "--env", "BROWSERBASE_PROXIES=" + ("true" if args.browserbase_proxies else "false"),
+        "--env", "BROWSERBASE_ADVANCED_STEALTH=" + ("true" if args.browserbase_stealth else "false"),
     ]
 
 
@@ -127,6 +128,11 @@ def main():
                    help="Beaker secret holding the Browserbase API key.")
     p.add_argument("--browserbase-project-secret", default="PS_BROWSERBASE_PROJECT_ID",
                    help="Beaker secret holding the Browserbase project id.")
+    p.add_argument("--browserbase-no-stealth", dest="browserbase_stealth",
+                   action="store_false", default=True,
+                   help="Disable advanced stealth. Stealth renders 1280x720 whatever "
+                        "viewport is requested, so this is the only way to get the "
+                        "configured 1280x1000 -- at the cost of anti-bot fingerprinting.")
     p.add_argument("--no-browserbase-proxies", dest="browserbase_proxies",
                    action="store_false",
                    help="Disable Browserbase residential proxies (they bill per GB, but they "
