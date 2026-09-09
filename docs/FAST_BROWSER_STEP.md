@@ -35,6 +35,15 @@ All of it is behind `SLIME_BROWSER_FAST_STEP` (default on; set `0` for the old p
    The commit wait matters: without it the check passes on the *old* document and
    the model gets a stale screenshot (measured: 7 `wait` calls and 15 extra steps
    over 5 tasks).
+   The check also tracks in-flight *content* requests through Playwright's
+   request events (documents, scripts, styles, fonts, images from any host, and
+   fetch/XHR to the page's own site; beacons, third-party XHR, websockets and
+   media are ignored) and keeps waiting while any is younger than
+   `SLIME_BROWSER_YOUNG_REQUEST_MS` (1500). Without this, pages that fetch their
+   content after `load` (Best Buy search results) passed every DOM check while
+   still empty, and an RL rerun's pre-training eval fell from 0.73 to 0.54 task
+   success; with it the eval is back at 0.73. While `document.readyState` is
+   still loading the wait may run to `SLIME_BROWSER_SETTLE_LOAD_MAX_MS` (10000).
 2. **No blind CAPTCHA grace polls.** One pump drains queued console events; the
    wait loop only runs if a `browserbase-solving-*` event actually arrived.
 3. **Screenshot over raw CDP** (`Page.captureScreenshot`, `optimizeForSpeed`):

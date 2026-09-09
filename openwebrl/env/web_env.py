@@ -38,6 +38,12 @@ _FAST_SCREENSHOT_QUALITY = int(os.environ.get("SLIME_BROWSER_FAST_SCREENSHOT_QUA
 # passes on the OLD document and the model sees a stale page (measured: 7 `wait`
 # actions and 15 extra steps over 5 tasks). Scroll never navigates and skips it.
 _NAV_GRACE_MS = int(float(os.environ.get("SLIME_BROWSER_NAV_GRACE_MS", "500")))
+# A request younger than this still counts as "content loading"; older in-flight
+# requests are treated as long-polls/streams and ignored (unlike networkidle).
+_YOUNG_REQUEST_MS = int(float(os.environ.get("SLIME_BROWSER_YOUNG_REQUEST_MS", "1500")))
+# While document.readyState is still "loading"/"interactive" the page is genuinely
+# mid-load, so the wait may run this long (a blank page is the worst outcome).
+_SETTLE_LOAD_MAX_MS = int(float(os.environ.get("SLIME_BROWSER_SETTLE_LOAD_MAX_MS", "10000")))
 # Optional audit: dump every step's screenshot + settle report here (fast path only).
 _DUMP_SHOTS_DIR = os.environ.get("SLIME_BROWSER_DUMP_SHOTS_DIR", "")
 
@@ -1046,22 +1052,54 @@ class WebEnv(BaseEnv):
             return
         tracked.add(page)
 
+        inflight = self._inflight_requests = getattr(self, "_inflight_requests", {})
+
+        def _content_request(req) -> bool:
+            # Only requests that can change what is rendered: page assets from any
+            # host, and fetch/XHR to the page's own site. Analytics beacons, pings,
+            # third-party XHR, websockets and media never gate readiness.
+            rt = req.resource_type
+            if rt in ("document", "script", "stylesheet", "font", "image"):
+                return True
+            if rt in ("xhr", "fetch"):
+                try:
+                    from urllib.parse import urlparse
+                    a = urlparse(req.url).hostname or ""
+                    b = urlparse(page.url).hostname or ""
+                    return ".".join(a.split(".")[-2:]) == ".".join(b.split(".")[-2:])
+                except Exception:
+                    return False
+            return False
+
         def on_request(req):
             try:
+                if _content_request(req):
+                    inflight[req] = time.monotonic()
                 if req.is_navigation_request() and req.frame == page.main_frame:
                     self._nav_started_at = time.monotonic()
             except Exception:
                 pass
 
+        def on_request_done(req):
+            inflight.pop(req, None)
+
         def on_framenavigated(frame):
             try:
                 if frame == page.main_frame:
                     self._nav_committed_at = time.monotonic()
+                    inflight.clear()  # the old document's requests are gone with it
             except Exception:
                 pass
 
         page.on("request", on_request)
+        page.on("requestfinished", on_request_done)
+        page.on("requestfailed", on_request_done)
         page.on("framenavigated", on_framenavigated)
+
+    def _young_inflight(self) -> int:
+        """In-flight requests started less than _YOUNG_REQUEST_MS ago (content still arriving)."""
+        now = time.monotonic()
+        return sum(1 for t in getattr(self, "_inflight_requests", {}).values() if (now - t) * 1000 < _YOUNG_REQUEST_MS)
 
     async def _settle_until_ready(self, may_navigate: bool = True) -> None:
         """Fast path: wait for the page to be rendered instead of sleeping on timers.
@@ -1074,7 +1112,9 @@ class WebEnv(BaseEnv):
         """
         self._track_navigations()
         t_action = getattr(self, "_action_t0", 0.0)
-        deadline = time.monotonic() + (_SETTLE_MAX_MS + _NAV_GRACE_MS) / 1000.0
+        t_start = time.monotonic()
+        deadline = t_start + (_SETTLE_MAX_MS + _NAV_GRACE_MS) / 1000.0
+        hard_deadline = t_start + (_SETTLE_LOAD_MAX_MS + _NAV_GRACE_MS) / 1000.0
         if may_navigate and _NAV_GRACE_MS > 0:
             grace_end = time.monotonic() + _NAV_GRACE_MS / 1000.0
             while time.monotonic() < grace_end and self._nav_started_at < t_action:
@@ -1082,16 +1122,31 @@ class WebEnv(BaseEnv):
         if self._nav_started_at >= t_action:
             while time.monotonic() < deadline and self._nav_committed_at < t_action:
                 await asyncio.sleep(0.05)
-        for _ in range(3):
+        for _ in range(12):
             remaining_ms = max(200, int((deadline - time.monotonic()) * 1000))
             try:  # returns at once if no navigation is in flight
                 await self.page.wait_for_load_state("load", timeout=remaining_ms)
             except Exception:
                 pass
+            # Content fetched by page JS (search results, product grids) arrives over
+            # fetch/XHR after `load`; wait while any such request is still young.
+            waited_net = 0
+            while self._young_inflight() and time.monotonic() < deadline:
+                await asyncio.sleep(0.1); waited_net += 1
+            remaining_ms = max(200, int((deadline - time.monotonic()) * 1000))
             try:
-                self.last_settle_report = await self.page.evaluate(
-                    _READY_JS, [min(_SETTLE_MAX_MS, remaining_ms), _SETTLE_QUIET_MS]
-                )
+                rep = await self.page.evaluate(_READY_JS, [min(_SETTLE_MAX_MS, remaining_ms), _SETTLE_QUIET_MS])
+                rep["net_wait_ms"] = waited_net * 100
+                rep["total_ms"] = int((time.monotonic() - t_start) * 1000)
+                self.last_settle_report = rep
+                # a request that started during the DOM check means more content is coming
+                if self._young_inflight() and time.monotonic() < deadline:
+                    continue
+                # document still loading: keep waiting up to the longer load cap
+                if rep.get("blocked_on") == "readyState" and time.monotonic() < hard_deadline:
+                    deadline = min(hard_deadline, time.monotonic() + _SETTLE_MAX_MS / 1000.0)
+                    await asyncio.sleep(0.2)
+                    continue
                 return
             except Exception as exc:  # document replaced mid-check: wait for the new one
                 self.last_settle_report = {"error": str(exc)[:80]}
