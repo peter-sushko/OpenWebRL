@@ -52,16 +52,34 @@ _DUMP_SHOTS_DIR = os.environ.get("SLIME_BROWSER_DUMP_SHOTS_DIR", "")
 # (long-polls never finish, so unlike networkidle they do not block), and the DOM
 # signature unchanged for two 50 ms polls. Bounded by maxMs.
 _READY_JS = """
-([maxMs, quietMs]) => new Promise(res => {
+([maxMs, quietMs, youngMs]) => new Promise(res => {
+    // In-page tracker for same-site fetch/XHR (content loads). Installed lazily here
+    // and via add_init_script for new documents; costs the controller nothing.
+    if (!window.__owrl) {
+        const o = window.__owrl = {inflight: new Map(), seq: 0};
+        const same = u => { try { const h = new URL(u, location.href).hostname;
+            return h.split('.').slice(-2).join('.') === location.hostname.split('.').slice(-2).join('.'); } catch (e) { return false; } };
+        const of = window.fetch;
+        if (of) window.fetch = function(input) { const u = typeof input === 'string' ? input : (input && input.url) || '';
+            if (!same(u)) return of.apply(this, arguments);
+            const id = ++o.seq; o.inflight.set(id, performance.now());
+            return of.apply(this, arguments).finally(() => o.inflight.delete(id)); };
+        const oo = XMLHttpRequest.prototype.open, os = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function(m, u) { this.__owrl_same = same(u); return oo.apply(this, arguments); };
+        XMLHttpRequest.prototype.send = function() { if (this.__owrl_same) { const id = ++o.seq; o.inflight.set(id, performance.now());
+            this.addEventListener('loadend', () => o.inflight.delete(id)); } return os.apply(this, arguments); };
+    }
     const t0 = performance.now();
     let last = null, stable = 0, polls = 0;
     const lastRes = () => { const e = performance.getEntriesByType('resource'); return e.length ? e[e.length-1].responseEnd : 0; };
     const inView = el => { const r = el.getBoundingClientRect();
         return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth; };
+    const young = () => { const now = performance.now(); for (const t of window.__owrl.inflight.values()) if (now - t < youngMs) return true; return false; };
     const ready = () => {
         if (document.readyState !== 'complete') return 'readyState';
         if (document.fonts && document.fonts.status !== 'loaded') return 'fonts';
         for (const img of document.images) if (inView(img) && !img.complete) return 'img';
+        if (youngMs > 0 && young()) return 'xhr';
         if (quietMs > 0 && performance.now() - lastRes() < quietMs) return 'net';
         return null;
     };
@@ -76,6 +94,10 @@ _READY_JS = """
     };
     tick();
 })"""
+
+# Same tracker for documents created after the first one (installed once per context).
+_TRACKER_INIT_JS = _READY_JS.split("const t0 = performance.now();")[0].replace("([maxMs, quietMs, youngMs]) => new Promise(res => {", "(() => {") + "})();"
+
 
 
 class WebEnv(BaseEnv):
@@ -1040,119 +1062,74 @@ class WebEnv(BaseEnv):
             pass  # Page may never reach networkidle (e.g., long-polling)
         await self.page.wait_for_timeout(_POST_ACTION_WAIT_MS)
 
-    def _track_navigations(self) -> None:
-        """Flag main-frame navigation start (request) and commit (framenavigated)."""
-        tracked = getattr(self, "_nav_tracked_pages", None)
-        if tracked is None:
-            tracked = self._nav_tracked_pages = set()
-            self._nav_started_at = 0.0
-            self._nav_committed_at = 0.0
-        page = self.page
-        if page in tracked:
+    async def _install_tracker(self) -> None:
+        """Install the in-page fetch/XHR tracker for future documents (once per context)."""
+        ctx = self.context
+        if ctx is None or getattr(self, "_tracker_ctx", None) is ctx:
             return
-        tracked.add(page)
-
-        inflight = self._inflight_requests = getattr(self, "_inflight_requests", {})
-
-        def _content_request(req) -> bool:
-            # Only requests that can change what is rendered: page assets from any
-            # host, and fetch/XHR to the page's own site. Analytics beacons, pings,
-            # third-party XHR, websockets and media never gate readiness.
-            rt = req.resource_type
-            if rt in ("document", "script", "stylesheet", "font", "image"):
-                return True
-            if rt in ("xhr", "fetch"):
-                try:
-                    from urllib.parse import urlparse
-                    a = urlparse(req.url).hostname or ""
-                    b = urlparse(page.url).hostname or ""
-                    return ".".join(a.split(".")[-2:]) == ".".join(b.split(".")[-2:])
-                except Exception:
-                    return False
-            return False
-
-        def on_request(req):
-            try:
-                if _content_request(req):
-                    inflight[req] = time.monotonic()
-                if req.is_navigation_request() and req.frame == page.main_frame:
-                    self._nav_started_at = time.monotonic()
-            except Exception:
-                pass
-
-        def on_request_done(req):
-            inflight.pop(req, None)
-
-        def on_framenavigated(frame):
-            try:
-                if frame == page.main_frame:
-                    self._nav_committed_at = time.monotonic()
-                    inflight.clear()  # the old document's requests are gone with it
-            except Exception:
-                pass
-
-        page.on("request", on_request)
-        page.on("requestfinished", on_request_done)
-        page.on("requestfailed", on_request_done)
-        page.on("framenavigated", on_framenavigated)
-
-    def _young_inflight(self) -> int:
-        """In-flight requests started less than _YOUNG_REQUEST_MS ago (content still arriving)."""
-        now = time.monotonic()
-        return sum(1 for t in getattr(self, "_inflight_requests", {}).values() if (now - t) * 1000 < _YOUNG_REQUEST_MS)
+        try:
+            await ctx.add_init_script(_TRACKER_INIT_JS)
+        except Exception as exc:
+            logger.warning("add_init_script failed: %s", exc)
+        self._tracker_ctx = ctx
 
     async def _settle_until_ready(self, may_navigate: bool = True) -> None:
         """Fast path: wait for the page to be rendered instead of sleeping on timers.
 
-        1. grace window for a click-triggered navigation to START (request event);
-        2. if one started, wait for it to COMMIT (framenavigated) -- until then the
-           old document still reports load-complete and the check would pass on it;
-        3. wait for `load`, then run the in-page readiness check, retrying if the
-           document is replaced under it (redirect chains).
+        Everything is event-driven or in-page so the single rollout controller does
+        at most three round trips per action and no polling:
+        1. `expect_navigation(commit)` for up to the grace window catches a
+           click-triggered navigation that has not started or committed yet
+           (the old document would otherwise pass the check);
+        2. `wait_for_load_state("load")` (instant when nothing is loading);
+        3. one `evaluate` that waits in the page until the document is complete,
+           fonts loaded, viewport images decoded, no young same-site fetch/XHR,
+           no resource finished for quietMs, and the DOM stable for two polls.
         """
-        self._track_navigations()
-        t_action = getattr(self, "_action_t0", 0.0)
+        await self._install_tracker()
         t_start = time.monotonic()
-        deadline = t_start + (_SETTLE_MAX_MS + _NAV_GRACE_MS) / 1000.0
-        hard_deadline = t_start + (_SETTLE_LOAD_MAX_MS + _NAV_GRACE_MS) / 1000.0
+        navigated = False
+        # Phase A: navigation. Give a click-triggered navigation the grace window to
+        # commit, then wait for the (new) document's load event.
         if may_navigate and _NAV_GRACE_MS > 0:
-            grace_end = time.monotonic() + _NAV_GRACE_MS / 1000.0
-            while time.monotonic() < grace_end and self._nav_started_at < t_action:
-                await asyncio.sleep(0.05)
-        if self._nav_started_at >= t_action:
-            while time.monotonic() < deadline and self._nav_committed_at < t_action:
-                await asyncio.sleep(0.05)
+            try:
+                async with self.page.expect_navigation(wait_until="commit", timeout=_NAV_GRACE_MS):
+                    pass
+                navigated = True
+            except Exception:
+                pass  # no navigation within the grace window
+        try:
+            await self.page.wait_for_load_state("load", timeout=_SETTLE_LOAD_MAX_MS)
+        except Exception:
+            pass
+        # Phase B: content. Its own budget, so a slow navigation does not eat it.
+        t_b = time.monotonic()
+        deadline = t_b + _SETTLE_MAX_MS / 1000.0
+        hard_deadline = t_b + _SETTLE_LOAD_MAX_MS / 1000.0
         for _ in range(12):
             remaining_ms = max(200, int((deadline - time.monotonic()) * 1000))
-            try:  # returns at once if no navigation is in flight
-                await self.page.wait_for_load_state("load", timeout=remaining_ms)
-            except Exception:
-                pass
-            # Content fetched by page JS (search results, product grids) arrives over
-            # fetch/XHR after `load`; wait while any such request is still young.
-            waited_net = 0
-            while self._young_inflight() and time.monotonic() < deadline:
-                await asyncio.sleep(0.1); waited_net += 1
-            remaining_ms = max(200, int((deadline - time.monotonic()) * 1000))
             try:
-                rep = await self.page.evaluate(_READY_JS, [min(_SETTLE_MAX_MS, remaining_ms), _SETTLE_QUIET_MS])
-                rep["net_wait_ms"] = waited_net * 100
+                rep = await self.page.evaluate(_READY_JS, [remaining_ms, _SETTLE_QUIET_MS, _YOUNG_REQUEST_MS])
+                rep["navigated"] = navigated
+                rep["nav_ms"] = int((t_b - t_start) * 1000)
                 rep["total_ms"] = int((time.monotonic() - t_start) * 1000)
                 self.last_settle_report = rep
-                # a request that started during the DOM check means more content is coming
-                if self._young_inflight() and time.monotonic() < deadline:
-                    continue
-                # document still loading: keep waiting up to the longer load cap
-                if rep.get("blocked_on") == "readyState" and time.monotonic() < hard_deadline:
+                # Content genuinely still arriving (document loading or same-site
+                # fetch/XHR in flight): keep waiting, up to the longer load cap.
+                if rep.get("blocked_on") in ("readyState", "xhr") and time.monotonic() < hard_deadline:
                     deadline = min(hard_deadline, time.monotonic() + _SETTLE_MAX_MS / 1000.0)
                     await asyncio.sleep(0.2)
                     continue
                 return
             except Exception as exc:  # document replaced mid-check: wait for the new one
                 self.last_settle_report = {"error": str(exc)[:80]}
-                if time.monotonic() > deadline:
+                if time.monotonic() > hard_deadline:
                     return
-                await asyncio.sleep(0.1)
+                try:
+                    await self.page.wait_for_load_state("load", timeout=max(200, int((hard_deadline - time.monotonic()) * 1000)))
+                except Exception:
+                    pass
+                deadline = min(hard_deadline, time.monotonic() + _SETTLE_MAX_MS / 1000.0)
 
     async def _execute_click(self, parameters: Dict[str, Any]) -> tuple[bool, str]:
         """
