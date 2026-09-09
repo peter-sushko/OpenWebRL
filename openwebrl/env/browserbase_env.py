@@ -31,7 +31,7 @@ if _REPO_ROOT not in sys.path:
 
 from playwright.async_api import async_playwright
 
-from openwebrl.env.web_env import WebEnv
+from openwebrl.env.web_env import WebEnv, _FAST_STEP
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,17 @@ _CAPTCHA_POLL_SECS = 0.5
 _MANIFEST_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".browserbase_sessions"
 )
+
+
+def _same_site(current: str, target: str) -> bool:
+    """True when the page already sits on the target's host (sites redirect the
+    bare start URL to a canonical path, so an exact match would never hit)."""
+    from urllib.parse import urlparse
+    try:
+        a, b = urlparse(current), urlparse(target)
+    except Exception:
+        return False
+    return bool(a.netloc) and a.netloc.lower().removeprefix("www.") == b.netloc.lower().removeprefix("www.")
 
 
 def _save_session_id(session_id: Any) -> None:
@@ -205,6 +216,10 @@ class BrowserbaseWebEnv(WebEnv):
 
         for i, url in enumerate(start_urls):
             page = existing_pages[i] if i < len(existing_pages) else await self.context.new_page()
+            # reset() re-enters here right after setup() already navigated to the
+            # same URL; the fast path skips the second navigation (6-8 s).
+            if _FAST_STEP and _same_site(page.url, url):
+                continue
             for attempt in range(self.max_retries):
                 try:
                     await page.goto(url, timeout=self.init_navigation_timeout, wait_until="domcontentloaded")
@@ -229,7 +244,10 @@ class BrowserbaseWebEnv(WebEnv):
         # The landing page itself can be gated; let any interstitial resolve
         # before the first screenshot is taken.
         await self._wait_for_captcha_if_needed()
-        await asyncio.sleep(2)
+        if _FAST_STEP:
+            await self._settle_until_ready()
+        else:
+            await asyncio.sleep(2)
 
     # ------------------------------------------------------------------
     # CAPTCHA handling
@@ -270,6 +288,11 @@ class BrowserbaseWebEnv(WebEnv):
         must issue nothing but the cookie pump that drains the event queue.
         """
         await self._pump()
+
+        # Fast path: one pump drains queued console events; no blind 1.5 s grace
+        # polling after every action. The listener still catches a real challenge.
+        if not self._captcha_events and _FAST_STEP:
+            return
 
         if not self._captcha_events:
             for _ in range(_CAPTCHA_GRACE_POLLS):
