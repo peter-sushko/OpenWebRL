@@ -1774,7 +1774,9 @@ async def _generate_turn_sample_impl(
         processor = state.processor
         sampling_params = sampling_params.copy()
 
+        t0 = time.monotonic()
         observation, info = await env.reset()
+        env_setup_secs = time.monotonic() - t0
         tools_info, policy = adapter.parse_env_info(info)
         adapter._tools_info = tools_info
         adapter._tool_parser = ToolParser(tools_info)
@@ -1891,8 +1893,13 @@ async def _generate_turn_sample_impl(
             turn_sample.metadata["image_grid_thw"] = image_grid_thw
             turn_sample.multimodal_inputs = {"images": img_list}
             turn_sample.multimodal_train_inputs = mm_train
+            # Wall-clock per turn (read back by run_evaluate.py as turn_timings).
+            turn_sample.metadata["step_env_secs"] = env_setup_secs if step == 0 else 0.0
+            if step == 0:
+                turn_sample.metadata["env_setup_secs"] = env_setup_secs
 
             # 7. Run inference ---------------------------------------------
+            t0 = time.monotonic()
             llm_response, new_tokens, new_logprobs, finish_type = await _run_inference_step(
                 url,
                 input_text,
@@ -1900,6 +1907,7 @@ async def _generate_turn_sample_impl(
                 img_list,
                 timeout_secs=getattr(args, "inference_step_timeout_secs", None),
             )
+            turn_sample.metadata["step_infer_secs"] = time.monotonic() - t0
             # --------------------------------------------------------------
             if _should_sample_llm_output(args):
                 logger.info(f"Task {task_id} step {step} llm_response={llm_response[:1000]!r}")
@@ -1954,8 +1962,12 @@ async def _generate_turn_sample_impl(
             if parsed.success and len(parsed.calls) > 0:
                 actions = adapter.actions_from_parsed(parsed.calls)
 
+                t0 = time.monotonic()
                 try:
                     observation, _, terminated, _, info = await env.step(actions)
+                    turn_sample.metadata["step_env_secs"] += time.monotonic() - t0
+                    for phase, secs in (getattr(env, "last_step_timings", None) or {}).items():
+                        turn_sample.metadata[f"step_env_{phase}_secs"] = secs
                 except Exception as step_err:
                     logger.warning(f"Task {task_id} step {step}: env.step() failed, marking as ABORTED: {step_err}")
                     # raise ValueError(f"❗  Environment step failed: {step_err}") from step_err
